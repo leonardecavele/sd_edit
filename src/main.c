@@ -583,10 +583,27 @@ static int sanitize_suffix(const char *text, char *output, size_t output_size)
     return 0;
 }
 
-static int build_output_path(const char *input_path, const char *label, char *output_path, size_t output_size)
+static int path_exists(const char *path)
+{
+    DWORD attributes;
+
+    if (path == NULL || *path == '\0')
+    {
+        return 0;
+    }
+
+    attributes = GetFileAttributesA(path);
+    return attributes != INVALID_FILE_ATTRIBUTES;
+}
+
+static int build_output_path_candidate(
+    const char *input_path,
+    const char *suffix,
+    int collision_index,
+    char *output_path,
+    size_t output_size)
 {
     const char *extension;
-    char suffix[MAX_PRESET_NAME];
 
     if (input_path == NULL || output_path == NULL || output_size == 0 || !has_wav_extension(input_path))
     {
@@ -600,24 +617,55 @@ static int build_output_path(const char *input_path, const char *label, char *ou
         return -1;
     }
 
-    if (sanitize_suffix(label, suffix, sizeof(suffix)) != 0)
-    {
-        return -1;
-    }
-
     if (snprintf(
         output_path,
         output_size,
-        "%.*s_%s.wav",
+        collision_index > 0 ? "%.*s_%s%d.wav" : "%.*s_%s.wav",
         (int)(extension - input_path),
         input_path,
-        suffix
+        suffix,
+        collision_index
     ) >= (int)output_size)
     {
         return -1;
     }
 
     return 0;
+}
+
+static int build_output_path(const char *input_path, const char *label, char *output_path, size_t output_size)
+{
+    char suffix[MAX_PRESET_NAME];
+
+    if (input_path == NULL || output_path == NULL || output_size == 0 || !has_wav_extension(input_path))
+    {
+        return -1;
+    }
+
+    if (sanitize_suffix(label, suffix, sizeof(suffix)) != 0)
+    {
+        return -1;
+    }
+
+    for (int collision_index = 0; collision_index < INT_MAX; collision_index++)
+    {
+        if (build_output_path_candidate(
+            input_path,
+            suffix,
+            collision_index,
+            output_path,
+            output_size) != 0)
+        {
+            return -1;
+        }
+
+        if (!path_exists(output_path))
+        {
+            return 0;
+        }
+    }
+
+    return -1;
 }
 
 static int update_current_preset(Session *session, const Preset *preset)

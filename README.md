@@ -336,11 +336,13 @@ Suffix behavior:
 - `-` and `_` are kept
 - all other characters become `_`
 - an empty suffix falls back to `processed`
+- if that output path already exists, the program retries with `1`, `2`, and so on appended to the suffix until it finds a free filename
 
 Examples:
 
 - `do audio\\test.wav` writes `audio\\test_random.wav`
 - `do audio\\test.wav p1` writes `audio\\test_p1.wav`
+- if `audio\\test_random.wav` already exists, the next random run writes `audio\\test_random1.wav`
 
 ## Supported effects
 
