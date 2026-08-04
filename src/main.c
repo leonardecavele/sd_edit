@@ -715,16 +715,33 @@ static int load_audio_file(const char *input_path, short **samples, SF_INFO *inf
 static int save_audio_file(const char *output_path, const SF_INFO *info, const short *samples)
 {
     SNDFILE *output_file;
+    SF_INFO output_info;
     sf_count_t sample_count;
     sf_count_t written_count;
     const char *write_error;
+    int close_status;
 
     if (output_path == NULL || info == NULL || samples == NULL)
     {
         return -1;
     }
 
-    output_file = sndfile_open_file(output_path, SFM_WRITE, (SF_INFO *)info);
+    if (info->frames <= 0 || info->channels <= 0)
+    {
+        fprintf(stderr, "Invalid output audio metadata for: %s\n", output_path);
+        return -1;
+    }
+
+    if (info->frames > (SF_COUNT_MAX / info->channels))
+    {
+        fprintf(stderr, "Output audio metadata is too large to save safely: %s\n", output_path);
+        return -1;
+    }
+
+    sample_count = info->frames * info->channels;
+    output_info = *info;
+
+    output_file = sndfile_open_file(output_path, SFM_WRITE, &output_info);
 
     if (output_file == NULL)
     {
@@ -732,10 +749,9 @@ static int save_audio_file(const char *output_path, const SF_INFO *info, const s
         return -1;
     }
 
-    sample_count = info->frames * info->channels;
     written_count = sndfile_write_short(output_file, samples, sample_count);
     write_error = sndfile_error_string(output_file);
-    sndfile_close_file(output_file);
+    close_status = sndfile_close_file(output_file);
 
     if (written_count != sample_count)
     {
@@ -747,6 +763,12 @@ static int save_audio_file(const char *output_path, const SF_INFO *info, const s
         {
             fprintf(stderr, "Unable to write the full processed audio buffer to: %s\n", output_path);
         }
+        return -1;
+    }
+
+    if (close_status != 0)
+    {
+        fprintf(stderr, "Unable to finalize the output audio file: %s\n", output_path);
         return -1;
     }
 
