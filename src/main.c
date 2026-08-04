@@ -117,6 +117,46 @@ static int equals_ignore_case(const char *left, const char *right)
     return *left == '\0' && *right == '\0';
 }
 
+static int matches_command_name_ignore_case(const char *line, const char *command_name, const char **remainder)
+{
+    const char *cursor;
+
+    if (line == NULL || command_name == NULL)
+    {
+        return 0;
+    }
+
+    cursor = line;
+
+    while (*cursor != '\0' && *command_name != '\0')
+    {
+        if (tolower((unsigned char)*cursor) != tolower((unsigned char)*command_name))
+        {
+            return 0;
+        }
+
+        cursor++;
+        command_name++;
+    }
+
+    if (*command_name != '\0')
+    {
+        return 0;
+    }
+
+    if (*cursor != '\0' && !isspace((unsigned char)*cursor))
+    {
+        return 0;
+    }
+
+    if (remainder != NULL)
+    {
+        *remainder = cursor;
+    }
+
+    return 1;
+}
+
 static int has_wav_extension(const char *path)
 {
     const char *extension;
@@ -226,14 +266,22 @@ static void print_usage(void)
     size_t effect_count;
     const EffectDescriptor *catalog = get_effect_catalog(&effect_count);
 
-    printf("Usage:\n");
-    printf("  main.exe do <file.wav>\n");
-    printf("  main.exe do <file.wav> <preset_name>\n");
-    printf("  main.exe play <file.wav>\n");
-    printf("  main.exe preset <effect,parameter,mix,length;...>\n");
-    printf("  main.exe save preset <name>\n");
+    printf("wav mini-console commands:\n");
+    printf("  help\n");
+    printf("  do <file.wav>\n");
+    printf("  do <file.wav> <preset_name>\n");
+    printf("  play <file.wav>\n");
+    printf("  preset <effect,parameter,mix,length;...>\n");
+    printf("  save preset <name>\n");
+    printf("  show preset\n");
+    printf("  exit\n");
+    printf("  quit\n");
     printf("\n");
-    printf("Interactive mode starts when no arguments are provided.\n");
+    printf("Run main.exe with no arguments to open the prompt.\n");
+    printf("Direct invocation shortcuts are also supported, for example:\n");
+    printf("  main.exe help\n");
+    printf("  main.exe do <file.wav>\n");
+    printf("\n");
     printf("Preset definition example:\n");
     printf("  preset 1,120,50,44100;2,2048,100,22050\n");
     printf("\n");
@@ -782,10 +830,11 @@ static int run_interactive_console(Session *session)
     char line[MAX_COMMAND_LENGTH];
 
     printf("wav mini-console\n");
-    printf("Type 'help' for usage and 'exit' to quit.\n");
+    printf("Type 'help' for commands and 'exit' or 'quit' to leave.\n");
 
     while (1)
     {
+        const char *preset_definition;
         char *tokens[4];
         int token_count;
         char *command;
@@ -811,10 +860,9 @@ static int run_interactive_console(Session *session)
             return 0;
         }
 
-        if (strncmp(command, "preset ", 7) == 0)
+        if (matches_command_name_ignore_case(command, "preset", &preset_definition))
         {
-            char *definition = trim_whitespace(command + 7);
-            execute_tokens(session, 2, (char *[]) { "preset", definition });
+            execute_tokens(session, 2, (char *[]) { "preset", (char *)preset_definition });
             continue;
         }
 
@@ -829,27 +877,27 @@ static int run_interactive_console(Session *session)
     }
 }
 
-static int run_cli(Session *session, int argc, char **argv)
+static int run_direct_command_shortcut(Session *session, int argc, char **argv)
 {
-    char *command_argv[3];
+    char *command_argv[2];
     size_t total_length = 0;
     char *definition;
     int result;
 
-    if (argc < 2)
+    if (argc <= 0 || argv == NULL)
     {
-        return run_interactive_console(session);
+        return -1;
     }
 
-    if (equals_ignore_case(argv[1], "preset"))
+    if (equals_ignore_case(argv[0], "preset"))
     {
-        if (argc < 3)
+        if (argc < 2)
         {
             fprintf(stderr, "Usage: preset <effect,parameter,mix,length;...>\n");
             return -1;
         }
 
-        for (int index = 2; index < argc; index++)
+        for (int index = 1; index < argc; index++)
         {
             total_length += strlen(argv[index]) + 1;
         }
@@ -864,7 +912,7 @@ static int run_cli(Session *session, int argc, char **argv)
 
         definition[0] = '\0';
 
-        for (int index = 2; index < argc; index++)
+        for (int index = 1; index < argc; index++)
         {
             strcat(definition, argv[index]);
 
@@ -881,7 +929,17 @@ static int run_cli(Session *session, int argc, char **argv)
         return result;
     }
 
-    return execute_tokens(session, argc - 1, argv + 1);
+    return execute_tokens(session, argc, argv);
+}
+
+static int run_cli(Session *session, int argc, char **argv)
+{
+    if (argc < 2)
+    {
+        return run_interactive_console(session);
+    }
+
+    return run_direct_command_shortcut(session, argc - 1, argv + 1);
 }
 
 int main(int argc, char **argv)

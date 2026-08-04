@@ -45,13 +45,16 @@ The original product draft defined this target command set:
 
 It also only explicitly defined effect `1 = pitch`, while leaving later effect IDs open.
 
-The current implementation keeps that direction, but already adds:
+The current implementation keeps that direction, but now exposes it primarily through an interactive prompt opened by running the program with no command arguments. The same command words are still accepted as direct one-shot shortcuts.
 
-- an interactive REPL when no arguments are provided
+Current implementation details that extend the original draft:
+
+- interactive prompt-first workflow
 - `help`
 - `show preset`
+- `exit` and `quit`
 - a centralized effect catalog with IDs `1` through `6`
-- session-local preset state used by `show preset` and `save preset`
+- session-local preset state used by `preset`, `do`, `show preset`, and `save preset`
 
 The sections below document the current code behavior without changing the product objective.
 
@@ -76,6 +79,14 @@ make
 Run the program through the makefile wrapper:
 
 ```sh
+make run
+```
+
+This is the primary workflow. It launches `main.exe` with no command arguments, which opens the interactive prompt.
+
+If you want to run a direct shortcut through the wrapper instead, pass `ARGS`:
+
+```sh
 make run ARGS="do audio\\test.wav"
 ```
 
@@ -98,7 +109,13 @@ For this repository, `make run` is the safest documented execution path on Windo
 
 ### Direct execution
 
-After `make`, you can run `main.exe` directly:
+After `make`, you can start the interactive console directly:
+
+```sh
+main.exe
+```
+
+Shortcut mode is still available for one-shot commands:
 
 ```sh
 main.exe help
@@ -110,79 +127,104 @@ If you do that outside `make run`, the libsndfile runtime still has to be reacha
 
 ## Usage
 
-### Command reference
+### Primary workflow: interactive prompt
 
-`do <file.wav>`
-
-- validates that the input ends in `.wav`
-- loads the file once to inspect audio metadata
-- generates a random preset
-- stores that preset as the current in-memory preset for the running process
-- reloads the file, applies the preset segments in order, and writes `<input>_random.wav`
-
-`do <file.wav> <preset_name>`
-
-- validates that the input ends in `.wav`
-- loads the latest matching named preset from `presets.txt`
-- stores that preset as the current in-memory preset for the running process
-- applies it to the input file and writes `<input>_<preset_name>.wav` after suffix sanitization
-
-`preset <effect,parameter,mix,length;...>`
-
-- parses an explicit preset definition
-- replaces the current in-memory preset for the running process
-- prints the parsed preset back to the console
-
-`save preset <name>`
-
-- appends the current in-memory preset to `presets.txt`
-- fails if no preset has been created or loaded in the current process
-
-`play <file.wav>`
-
-- validates that the input ends in `.wav`
-- resolves the full path to the bundled `sndfile-play.exe`
-- resolves the full path to the requested audio file
-- waits for the external player process to finish
-
-`help`
-
-- prints usage plus the currently registered effect catalog
-
-`show preset`
-
-- prints the current in-memory preset
-- prints `No current preset.` when no preset has been loaded in the current process
-
-### Interactive mode
-
-Running `main.exe` with no arguments starts a REPL-style console:
+Start the program and work from the prompt:
 
 ```sh
 make run
+```
+
+or, after building:
+
+```sh
+main.exe
 ```
 
 You will get a prompt like:
 
 ```text
 wav mini-console
-Type 'help' for usage and 'exit' to quit.
+Type 'help' for commands and 'exit' or 'quit' to leave.
 wav>
 ```
 
-Inside interactive mode:
+Run `help` at the prompt to print the full command list plus the currently registered effect catalog.
 
-- `exit` and `quit` leave the console
-- `preset ...` is handled specially so the rest of the line is preserved as the preset definition
-- `show preset` is useful because the process keeps one current preset in memory
-- `save preset <name>` only works after `preset ...` or `do ...` has set that current preset in the same process
+Supported prompt commands:
+
+- `help`
+  - prints the interactive command reference and current effect catalog
+
+- `do <file.wav>`
+  - validates that the input ends in `.wav`
+  - loads the file once to inspect audio metadata
+  - generates a random preset
+  - stores that preset as the current in-memory preset for the running process
+  - reloads the file, applies the preset segments in order, and writes `<input>_random.wav`
+
+- `do <file.wav> <preset_name>`
+  - validates that the input ends in `.wav`
+  - loads the latest matching named preset from `presets.txt`
+  - stores that preset as the current in-memory preset for the running process
+  - applies it to the input file and writes `<input>_<preset_name>.wav` after suffix sanitization
+
+- `play <file.wav>`
+  - validates that the input ends in `.wav`
+  - resolves the full path to the bundled `sndfile-play.exe`
+  - resolves the full path to the requested audio file
+  - waits for the external player process to finish
+
+- `preset <effect,parameter,mix,length;...>`
+  - parses an explicit preset definition
+  - replaces the current in-memory preset for the running process
+  - preserves the full definition text after the command name, including internal spaces
+  - prints the parsed preset back to the console
+
+- `save preset <name>`
+  - appends the current in-memory preset to `presets.txt`
+  - fails if no preset has been created or loaded in the current process
+
+- `show preset`
+  - prints the current in-memory preset
+  - prints `No current preset.` when no preset has been loaded in the current process
+
+- `exit`
+  - leaves the console
+
+- `quit`
+  - leaves the console
 
 Example interactive flow:
 
 ```text
-preset 1,120,50,44100
-save preset p1
-show preset
+wav> help
+wav> show preset
+wav> preset 1,120,50,44100
+wav> PRESET 1,120,50,44100; 5,8000,40,44100
+wav> save preset demo
+wav> do audio\test.wav demo
+wav> do audio\test.wav
+wav> exit
+```
+
+The prompt is the intended way to chain commands that depend on session state. In particular, `show preset` and `save preset <name>` only operate on the current in-memory preset held by the running process.
+
+### Direct invocation shortcuts
+
+The same shared command dispatcher also accepts direct argv shortcuts for one-shot use:
+
+```sh
+main.exe help
+main.exe do audio\\test.wav
+main.exe do audio\\test.wav demo
+main.exe play audio\\test.wav
+```
+
+Direct `preset` is also supported. If the definition contains spaces, quote it so the shell passes the full text as command arguments:
+
+```sh
+main.exe preset "1,120,50,44100; 5,8000,40,44100"
 ```
 
 ### Session state limitation
@@ -196,7 +238,7 @@ main.exe preset 1,120,50,44100
 main.exe save preset p1
 ```
 
-The second command starts a fresh process, so there is no current preset to save. Use interactive mode when you want to create or load a preset and then save it in the same session.
+The second command starts a fresh process, so there is no current preset to save. Use the interactive prompt when you want to create or load a preset and then save it in the same session.
 
 ## Preset format
 
@@ -327,8 +369,8 @@ This is broader than the original roadmap note, which only explicitly reserved `
 
 - `src/main.c`
   - process-local session state
-  - CLI parsing and interactive console
-  - usage/help output
+  - prompt parsing, direct shortcut parsing, and interactive console
+  - shared usage/help output
   - audio file loading and saving
   - output-path generation
   - preset application over the audio buffer
@@ -355,6 +397,19 @@ This is broader than the original roadmap note, which only explicitly reserved `
   - effect ID enum
   - effect catalog descriptor type
   - effect API declarations
+
+### Session model
+
+The program keeps exactly one `current_preset` in memory per process.
+
+That matters most in the interactive console:
+
+- `preset ...` replaces the current session preset
+- `do <file.wav>` and `do <file.wav> <preset_name>` both update the current session preset
+- `show preset` reads the current session preset
+- `save preset <name>` persists the current session preset
+
+A new direct invocation such as `main.exe save preset demo` starts with an empty session, so it cannot see preset state created by an earlier process.
 
 ### Execution flow
 
@@ -403,4 +458,3 @@ Named-preset `do` path:
 - named preset storage is plain text and append-only
 - output processing is in-memory, not streaming
 - `play` depends on the bundled Windows player and runtime DLL setup
-- the README still describes a product roadmap, while the code reflects the current working implementation
