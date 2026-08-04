@@ -3,7 +3,7 @@ SHELL := cmd.exe
 
 CC = gcc
 
-SRC = src/main.c src/effects.c
+SRC = src/main.c src/effects.c src/preset.c
 OBJ = $(SRC:.c=.o)
 OUT = main.exe
 
@@ -18,7 +18,9 @@ INCLUDE = -I$(LIBSNDFILE_DIR)/include -Iinclude
 LIB = -L$(LIBSNDFILE_DIR)/lib -lsndfile
 
 all: $(OUT)
-	set "PATH=$(LIBSNDFILE_BIN_WIN);%PATH%" && $(OUT)
+
+run: $(OUT)
+	set "PATH=$(LIBSNDFILE_BIN_WIN);%PATH%" && $(OUT) $(ARGS)
 
 $(OUT): $(OBJ)
 	$(CC) $(OBJ) -o $(OUT) $(LIB)
@@ -27,8 +29,7 @@ $(OUT): $(OBJ)
 	$(CC) -c $< -o $@ $(INCLUDE)
 
 clean:
-	if exist "$(OUT)" del /Q "$(OUT)"
-	if exist "$(word 1,$(OBJ_WIN))" del /Q "$(word 1,$(OBJ_WIN))"
-	if exist "$(word 2,$(OBJ_WIN))" del /Q "$(word 2,$(OBJ_WIN))"
+	-del /Q "$(OUT)" 2>nul
+	-del /Q $(OBJ_WIN) 2>nul
 
-.PHONY: all clean
+.PHONY: all run clean
