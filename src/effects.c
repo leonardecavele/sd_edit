@@ -12,6 +12,16 @@
 #define ECHO_DECAY_PERCENT 60
 #define MAX_DISTORTION_DRIVE 800
 
+static const EffectDescriptor EFFECT_CATALOG[] =
+{
+    { EFFECT_PITCH_SHIFT, "pitch" },
+    { EFFECT_SHUFFLE_CHUNKS, "shuffle" },
+    { EFFECT_GAIN, "gain" },
+    { EFFECT_REVERSE, "reverse" },
+    { EFFECT_ECHO, "echo" },
+    { EFFECT_DISTORTION, "distortion" }
+};
+
 static short clamp_sample(int value)
 {
     if (value > SAMPLE_MAX)
@@ -341,5 +351,47 @@ int apply_effect(short *buffer, sf_count_t c, int effect_id, int parameter, int 
         default:
             return -1;
     }
+}
+
+const EffectDescriptor *get_effect_catalog(size_t *count)
+{
+    if (count != NULL)
+    {
+        *count = sizeof(EFFECT_CATALOG) / sizeof(EFFECT_CATALOG[0]);
+    }
+
+    return EFFECT_CATALOG;
+}
+
+const char *effect_name(int effect_id)
+{
+    size_t count;
+    const EffectDescriptor *catalog = get_effect_catalog(&count);
+
+    for (size_t index = 0; index < count; index++)
+    {
+        if (catalog[index].id == effect_id)
+        {
+            return catalog[index].name;
+        }
+    }
+
+    return "unknown";
+}
+
+int effect_is_supported(int effect_id)
+{
+    size_t count;
+    const EffectDescriptor *catalog = get_effect_catalog(&count);
+
+    for (size_t index = 0; index < count; index++)
+    {
+        if (catalog[index].id == effect_id)
+        {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
