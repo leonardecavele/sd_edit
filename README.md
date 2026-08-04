@@ -2,6 +2,8 @@
 
 `sd_edit` is a small C mini-console for `.wav` editing. It uses libsndfile for audio I/O and models processing as a preset made of ordered effect segments.
 
+This repository also serves as a small vehicle for testing agentic IDE workflows.
+
 The README serves two purposes in this repository:
 
 - it keeps the original product objective visible
