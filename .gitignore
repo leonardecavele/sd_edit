@@ -1,3 +1,26 @@
+# Build outputs
 *.o
-*.exe
+*.obj
+*.d
+main.exe
+*.out
+*.stackdump
+
+# Coverage / profiling artifacts
+*.gcda
+*.gcno
+*.gcov
+
+# Editor temp files
 *.swp
+*.swo
+*~
+
+# IDE / local workspace files
+.vscode/
+.idea/
+.vs/
+
+# OS noise
+Thumbs.db
+Desktop.ini
