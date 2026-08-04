@@ -98,14 +98,15 @@ make clean
 
 ### Runtime PATH behavior
 
-The `run` target prepends the bundled `libsndfile-1.2.2-win64\\bin` directory to `PATH` before launching `main.exe`.
+At startup, `main.exe` now tries to load `sndfile.dll` in this order:
 
-That matters for two reasons:
+- first from the bundled repository path relative to the executable:
+  `libsndfile-1.2.2-win64\\bin\\sndfile.dll`
+- then from the current process `PATH`
 
-- `main.exe` needs the libsndfile runtime, including `sndfile.dll`
-- `play` launches the bundled `sndfile-play.exe`, which also depends on that runtime
+If neither location works, the program reaches `main()` and prints a clear CLI error that mentions `sndfile.dll`, the expected bundled path, and the suggested fix.
 
-For this repository, `make run` is the safest documented execution path on Windows because it sets that runtime path for the current process automatically.
+The `run` target still prepends the bundled `libsndfile-1.2.2-win64\\bin` directory to `PATH` before launching `main.exe`, so it remains a convenient wrapper, but it is no longer the only thing preventing an opaque Windows loader failure before program startup.
 
 ### Direct execution
 
@@ -123,7 +124,7 @@ main.exe do audio\\test.wav
 main.exe play audio\\test.wav
 ```
 
-If you do that outside `make run`, the libsndfile runtime still has to be reachable. In practice, `sndfile.dll` must be available through `PATH`, and `play` also expects the bundled `sndfile-play.exe` at `.\libsndfile-1.2.2-win64\bin\sndfile-play.exe`.
+Direct execution no longer depends on pre-configuring `PATH` just to get past process startup. When the bundled runtime is present in the repository layout, `main.exe` loads it automatically. If the bundled DLL is missing and `PATH` also does not provide `sndfile.dll`, the program prints a controlled error instead of failing before `main()`.
 
 ## Usage
 
@@ -171,7 +172,7 @@ Supported prompt commands:
 
 - `play <file.wav>`
   - validates that the input ends in `.wav`
-  - resolves the full path to the bundled `sndfile-play.exe`
+  - resolves the full path to the bundled `sndfile-play.exe` relative to `main.exe`
   - resolves the full path to the requested audio file
   - waits for the external player process to finish
 
@@ -435,7 +436,7 @@ Named-preset `do` path:
 `play` path:
 
 1. validate the `.wav` path
-2. resolve the absolute path to `.\libsndfile-1.2.2-win64\bin\sndfile-play.exe`
+2. resolve the absolute path to the bundled `libsndfile-1.2.2-win64\bin\sndfile-play.exe` relative to `main.exe`
 3. resolve the absolute path to the input file
 4. spawn the bundled player and wait for it to exit
 
@@ -457,4 +458,4 @@ Named-preset `do` path:
 - preset state is not shared across separate program invocations
 - named preset storage is plain text and append-only
 - output processing is in-memory, not streaming
-- `play` depends on the bundled Windows player and runtime DLL setup
+- `play` still depends on the bundled Windows player and a working libsndfile runtime, even though both are now resolved more robustly at startup

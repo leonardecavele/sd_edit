@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
 
 #include <sndfile.h>
 
@@ -16,13 +18,252 @@
 #define MAX_COMMAND_LENGTH 4096
 #define MAX_OUTPUT_PATH 1024
 #define MAX_PRESET_NAME 128
-#define PLAY_COMMAND_PATH ".\\libsndfile-1.2.2-win64\\bin\\sndfile-play.exe"
+#define SNDFILE_DLL_RELATIVE_PATH "libsndfile-1.2.2-win64\\bin\\sndfile.dll"
+#define PLAY_COMMAND_RELATIVE_PATH "libsndfile-1.2.2-win64\\bin\\sndfile-play.exe"
+
+typedef SNDFILE *(*SfOpenFunction)(const char *path, int mode, SF_INFO *info);
+typedef sf_count_t (*SfReadShortFunction)(SNDFILE *file, short *ptr, sf_count_t items);
+typedef sf_count_t (*SfWriteShortFunction)(SNDFILE *file, const short *ptr, sf_count_t items);
+typedef int (*SfCloseFunction)(SNDFILE *file);
+typedef const char *(*SfStrerrorFunction)(SNDFILE *file);
+
+typedef struct
+{
+    HMODULE module;
+    char bundled_dll_path[MAX_OUTPUT_PATH];
+    char error_message[MAX_OUTPUT_PATH];
+    SfOpenFunction open_file;
+    SfReadShortFunction read_short;
+    SfWriteShortFunction write_short;
+    SfCloseFunction close_file;
+    SfStrerrorFunction strerror_file;
+} SndfileRuntime;
 
 typedef struct
 {
     Preset current_preset;
     int has_current_preset;
 } Session;
+
+static SndfileRuntime g_sndfile_runtime;
+
+static int get_executable_path(char *buffer, size_t buffer_size)
+{
+    DWORD copied_length;
+
+    if (buffer == NULL || buffer_size == 0)
+    {
+        return -1;
+    }
+
+    copied_length = GetModuleFileNameA(NULL, buffer, (DWORD)buffer_size);
+
+    if (copied_length == 0 || copied_length >= buffer_size)
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int build_path_relative_to_executable(const char *relative_path, char *buffer, size_t buffer_size)
+{
+    char executable_path[MAX_OUTPUT_PATH];
+    char *directory_separator;
+
+    if (relative_path == NULL || buffer == NULL || buffer_size == 0)
+    {
+        return -1;
+    }
+
+    if (get_executable_path(executable_path, sizeof(executable_path)) != 0)
+    {
+        return -1;
+    }
+
+    directory_separator = strrchr(executable_path, '\\');
+
+    if (directory_separator == NULL)
+    {
+        directory_separator = strrchr(executable_path, '/');
+    }
+
+    if (directory_separator == NULL)
+    {
+        return -1;
+    }
+
+    *directory_separator = '\0';
+
+    if (snprintf(buffer, buffer_size, "%s\\%s", executable_path, relative_path) >= (int)buffer_size)
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
+static void unload_sndfile_runtime(void)
+{
+    if (g_sndfile_runtime.module != NULL)
+    {
+        FreeLibrary(g_sndfile_runtime.module);
+    }
+
+    memset(&g_sndfile_runtime, 0, sizeof(g_sndfile_runtime));
+}
+
+static int initialize_sndfile_runtime(void)
+{
+    HMODULE module;
+
+    memset(&g_sndfile_runtime, 0, sizeof(g_sndfile_runtime));
+
+    if (build_path_relative_to_executable(
+        SNDFILE_DLL_RELATIVE_PATH,
+        g_sndfile_runtime.bundled_dll_path,
+        sizeof(g_sndfile_runtime.bundled_dll_path)) != 0)
+    {
+        snprintf(
+            g_sndfile_runtime.error_message,
+            sizeof(g_sndfile_runtime.error_message),
+            "Unable to resolve the bundled sndfile.dll path relative to main.exe."
+        );
+        return -1;
+    }
+
+    module = LoadLibraryA(g_sndfile_runtime.bundled_dll_path);
+
+    if (module == NULL)
+    {
+        module = LoadLibraryA("sndfile.dll");
+    }
+
+    if (module == NULL)
+    {
+        snprintf(
+            g_sndfile_runtime.error_message,
+            sizeof(g_sndfile_runtime.error_message),
+            "Tried the bundled runtime first, then PATH, but sndfile.dll could not be loaded."
+        );
+        return -1;
+    }
+
+    g_sndfile_runtime.module = module;
+    g_sndfile_runtime.open_file = (SfOpenFunction)GetProcAddress(module, "sf_open");
+    g_sndfile_runtime.read_short = (SfReadShortFunction)GetProcAddress(module, "sf_read_short");
+    g_sndfile_runtime.write_short = (SfWriteShortFunction)GetProcAddress(module, "sf_write_short");
+    g_sndfile_runtime.close_file = (SfCloseFunction)GetProcAddress(module, "sf_close");
+    g_sndfile_runtime.strerror_file = (SfStrerrorFunction)GetProcAddress(module, "sf_strerror");
+
+    if (g_sndfile_runtime.open_file == NULL ||
+        g_sndfile_runtime.read_short == NULL ||
+        g_sndfile_runtime.write_short == NULL ||
+        g_sndfile_runtime.close_file == NULL ||
+        g_sndfile_runtime.strerror_file == NULL)
+    {
+        snprintf(
+            g_sndfile_runtime.error_message,
+            sizeof(g_sndfile_runtime.error_message),
+            "Loaded sndfile.dll, but it does not export the libsndfile functions this program requires."
+        );
+        unload_sndfile_runtime();
+        return -1;
+    }
+
+    return 0;
+}
+
+static void print_sndfile_runtime_error(void)
+{
+    fprintf(
+        stderr,
+        "Unable to start because the libsndfile runtime (sndfile.dll) is not available.\n"
+        "Expected bundled runtime: %s\n"
+        "The program first tries that bundled DLL, then PATH.\n"
+        "Fix it by running 'make run' or by adding 'libsndfile-1.2.2-win64\\\\bin' to PATH.\n",
+        g_sndfile_runtime.bundled_dll_path[0] != '\0'
+            ? g_sndfile_runtime.bundled_dll_path
+            : SNDFILE_DLL_RELATIVE_PATH
+    );
+
+    if (g_sndfile_runtime.error_message[0] != '\0')
+    {
+        fprintf(stderr, "Details: %s\n", g_sndfile_runtime.error_message);
+    }
+}
+
+static SNDFILE *sndfile_open_file(const char *path, int mode, SF_INFO *info)
+{
+    if (g_sndfile_runtime.open_file == NULL)
+    {
+        return NULL;
+    }
+
+    return g_sndfile_runtime.open_file(path, mode, info);
+}
+
+static sf_count_t sndfile_read_short(SNDFILE *file, short *buffer, sf_count_t sample_count)
+{
+    if (g_sndfile_runtime.read_short == NULL)
+    {
+        return 0;
+    }
+
+    return g_sndfile_runtime.read_short(file, buffer, sample_count);
+}
+
+static sf_count_t sndfile_write_short(SNDFILE *file, const short *buffer, sf_count_t sample_count)
+{
+    if (g_sndfile_runtime.write_short == NULL)
+    {
+        return 0;
+    }
+
+    return g_sndfile_runtime.write_short(file, buffer, sample_count);
+}
+
+static int sndfile_close_file(SNDFILE *file)
+{
+    if (g_sndfile_runtime.close_file == NULL)
+    {
+        return 0;
+    }
+
+    return g_sndfile_runtime.close_file(file);
+}
+
+static const char *sndfile_error_string(SNDFILE *file)
+{
+    const char *detail;
+
+    if (g_sndfile_runtime.strerror_file == NULL)
+    {
+        return NULL;
+    }
+
+    detail = g_sndfile_runtime.strerror_file(file);
+
+    if (detail == NULL || detail[0] == '\0' || strncmp(detail, "No Error", 8) == 0)
+    {
+        return NULL;
+    }
+
+    return detail;
+}
+
+static void print_sndfile_operation_error(const char *message, const char *path, SNDFILE *file)
+{
+    const char *detail = sndfile_error_string(file);
+
+    if (detail != NULL)
+    {
+        fprintf(stderr, "%s: %s (%s)\n", message, path, detail);
+        return;
+    }
+
+    fprintf(stderr, "%s: %s\n", message, path);
+}
 
 static void init_session(Session *session)
 {
@@ -401,6 +642,7 @@ static int load_audio_file(const char *input_path, short **samples, SF_INFO *inf
     sf_count_t sample_count;
     short *buffer;
     sf_count_t read_count;
+    const char *read_error;
 
     if (input_path == NULL || samples == NULL || info == NULL)
     {
@@ -408,25 +650,25 @@ static int load_audio_file(const char *input_path, short **samples, SF_INFO *inf
     }
 
     memset(info, 0, sizeof(*info));
-    input_file = sf_open(input_path, SFM_READ, info);
+    input_file = sndfile_open_file(input_path, SFM_READ, info);
 
     if (input_file == NULL)
     {
-        fprintf(stderr, "Unable to open input file: %s\n", input_path);
+        print_sndfile_operation_error("Unable to open input file", input_path, NULL);
         return -1;
     }
 
     if (info->frames <= 0 || info->channels <= 0)
     {
         fprintf(stderr, "Unsupported audio metadata in file: %s\n", input_path);
-        sf_close(input_file);
+        sndfile_close_file(input_file);
         return -1;
     }
 
     if (info->frames > (SF_COUNT_MAX / info->channels))
     {
         fprintf(stderr, "Audio file is too large to process safely: %s\n", input_path);
-        sf_close(input_file);
+        sndfile_close_file(input_file);
         return -1;
     }
 
@@ -435,7 +677,7 @@ static int load_audio_file(const char *input_path, short **samples, SF_INFO *inf
     if ((size_t)sample_count > (SIZE_MAX / sizeof(short)))
     {
         fprintf(stderr, "Audio buffer would exceed available memory: %s\n", input_path);
-        sf_close(input_file);
+        sndfile_close_file(input_file);
         return -1;
     }
 
@@ -444,16 +686,24 @@ static int load_audio_file(const char *input_path, short **samples, SF_INFO *inf
     if (buffer == NULL)
     {
         fprintf(stderr, "Unable to allocate memory for audio buffer.\n");
-        sf_close(input_file);
+        sndfile_close_file(input_file);
         return -1;
     }
 
-    read_count = sf_read_short(input_file, buffer, sample_count);
-    sf_close(input_file);
+    read_count = sndfile_read_short(input_file, buffer, sample_count);
+    read_error = sndfile_error_string(input_file);
+    sndfile_close_file(input_file);
 
     if (read_count != sample_count)
     {
-        fprintf(stderr, "Unable to read the full audio buffer from: %s\n", input_path);
+        if (read_error != NULL)
+        {
+            fprintf(stderr, "Unable to read the full audio buffer from: %s (%s)\n", input_path, read_error);
+        }
+        else
+        {
+            fprintf(stderr, "Unable to read the full audio buffer from: %s\n", input_path);
+        }
         free(buffer);
         return -1;
     }
@@ -467,27 +717,36 @@ static int save_audio_file(const char *output_path, const SF_INFO *info, const s
     SNDFILE *output_file;
     sf_count_t sample_count;
     sf_count_t written_count;
+    const char *write_error;
 
     if (output_path == NULL || info == NULL || samples == NULL)
     {
         return -1;
     }
 
-    output_file = sf_open(output_path, SFM_WRITE, (SF_INFO *)info);
+    output_file = sndfile_open_file(output_path, SFM_WRITE, (SF_INFO *)info);
 
     if (output_file == NULL)
     {
-        fprintf(stderr, "Unable to create output file: %s\n", output_path);
+        print_sndfile_operation_error("Unable to create output file", output_path, NULL);
         return -1;
     }
 
     sample_count = info->frames * info->channels;
-    written_count = sf_write_short(output_file, samples, sample_count);
-    sf_close(output_file);
+    written_count = sndfile_write_short(output_file, samples, sample_count);
+    write_error = sndfile_error_string(output_file);
+    sndfile_close_file(output_file);
 
     if (written_count != sample_count)
     {
-        fprintf(stderr, "Unable to write the full processed audio buffer to: %s\n", output_path);
+        if (write_error != NULL)
+        {
+            fprintf(stderr, "Unable to write the full processed audio buffer to: %s (%s)\n", output_path, write_error);
+        }
+        else
+        {
+            fprintf(stderr, "Unable to write the full processed audio buffer to: %s\n", output_path);
+        }
         return -1;
     }
 
@@ -729,9 +988,12 @@ static int handle_play_command(const char *input_path)
         return -1;
     }
 
-    if (_fullpath(player_path, PLAY_COMMAND_PATH, sizeof(player_path)) == NULL)
+    if (build_path_relative_to_executable(
+        PLAY_COMMAND_RELATIVE_PATH,
+        player_path,
+        sizeof(player_path)) != 0)
     {
-        fprintf(stderr, "Unable to resolve player path: %s\n", PLAY_COMMAND_PATH);
+        fprintf(stderr, "Unable to resolve the bundled player path relative to main.exe.\n");
         return -1;
     }
 
@@ -947,9 +1209,16 @@ int main(int argc, char **argv)
     Session session;
     int exit_code;
 
-    srand((unsigned int)time(NULL));
+    if (initialize_sndfile_runtime() != 0)
+    {
+        print_sndfile_runtime_error();
+        return 1;
+    }
+
     init_session(&session);
+    srand((unsigned int)time(NULL));
     exit_code = run_cli(&session, argc, argv);
     free_session(&session);
+    unload_sndfile_runtime();
     return exit_code == 0 ? 0 : 1;
 }

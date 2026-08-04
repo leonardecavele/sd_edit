@@ -15,15 +15,16 @@ LIBSNDFILE_BIN_WIN := $(CURDIR_WIN)\$(subst /,\,$(LIBSNDFILE_DIR))\bin
 OBJ_WIN := $(subst /,\,$(OBJ))
 
 INCLUDE = -I$(LIBSNDFILE_DIR)/include -Iinclude
-LIB = -L$(LIBSNDFILE_DIR)/lib -lsndfile
 
 all: $(OUT)
+
+re: clean all
 
 run: $(OUT)
 	set "PATH=$(LIBSNDFILE_BIN_WIN);%PATH%" && $(OUT) $(ARGS)
 
 $(OUT): $(OBJ)
-	$(CC) $(OBJ) -o $(OUT) $(LIB)
+	$(CC) $(OBJ) -o $(OUT)
 
 %.o: %.c
 	$(CC) -c $< -o $@ $(INCLUDE)
@@ -32,4 +33,4 @@ clean:
 	-del /Q "$(OUT)" 2>nul
 	-del /Q $(OBJ_WIN) 2>nul
 
-.PHONY: all run clean
+.PHONY: all re run clean
