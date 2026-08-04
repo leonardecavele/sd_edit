@@ -21,6 +21,8 @@ main.exe
 .idea/
 .vs/
 
+.cache
+
 # OS noise
 Thumbs.db
 Desktop.ini
