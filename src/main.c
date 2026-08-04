@@ -19,6 +19,7 @@
 #define PRESET_STORE_PATH "presets.txt"
 #define MAX_COMMAND_LENGTH 4096
 #define MAX_COMPLETION_TOKENS 4
+#define MAX_COMMAND_HISTORY 100
 #define MAX_OUTPUT_PATH 1024
 #define MAX_PRESET_NAME 128
 #define SNDFILE_DLL_RELATIVE_PATH "libsndfile-1.2.2-win64\\bin\\sndfile.dll"
@@ -537,6 +538,15 @@ typedef struct
     char last_buffer[MAX_COMMAND_LENGTH];
 } CompletionSession;
 
+typedef struct
+{
+    char *entries[MAX_COMMAND_HISTORY];
+    int count;
+    int browse_index;
+    int has_draft;
+    char draft[MAX_COMMAND_LENGTH];
+} CommandHistory;
+
 static char *duplicate_string(const char *text)
 {
     size_t length;
@@ -557,6 +567,157 @@ static char *duplicate_string(const char *text)
 
     memcpy(copy, text, length + 1);
     return copy;
+}
+
+static void set_command_buffer(char *buffer, size_t buffer_size, const char *text)
+{
+    if (buffer == NULL || buffer_size == 0)
+    {
+        return;
+    }
+
+    if (text == NULL)
+    {
+        buffer[0] = '\0';
+        return;
+    }
+
+    snprintf(buffer, buffer_size, "%s", text);
+}
+
+static void reset_command_history_navigation(CommandHistory *history)
+{
+    if (history == NULL)
+    {
+        return;
+    }
+
+    history->browse_index = -1;
+    history->has_draft = 0;
+    history->draft[0] = '\0';
+}
+
+static void initialize_command_history(CommandHistory *history)
+{
+    if (history == NULL)
+    {
+        return;
+    }
+
+    memset(history, 0, sizeof(*history));
+    history->browse_index = -1;
+}
+
+static void free_command_history(CommandHistory *history)
+{
+    if (history == NULL)
+    {
+        return;
+    }
+
+    for (int index = 0; index < history->count; index++)
+    {
+        free(history->entries[index]);
+        history->entries[index] = NULL;
+    }
+
+    history->count = 0;
+    reset_command_history_navigation(history);
+}
+
+static int add_command_history_entry(CommandHistory *history, const char *line)
+{
+    char *entry;
+
+    if (history == NULL || line == NULL || *line == '\0')
+    {
+        return 0;
+    }
+
+    if (history->count > 0 && strcmp(history->entries[history->count - 1], line) == 0)
+    {
+        reset_command_history_navigation(history);
+        return 0;
+    }
+
+    entry = duplicate_string(line);
+
+    if (entry == NULL)
+    {
+        return -1;
+    }
+
+    if (history->count == MAX_COMMAND_HISTORY)
+    {
+        free(history->entries[0]);
+        memmove(
+            &history->entries[0],
+            &history->entries[1],
+            sizeof(history->entries[0]) * (MAX_COMMAND_HISTORY - 1)
+        );
+        history->count--;
+        history->entries[history->count] = NULL;
+    }
+
+    history->entries[history->count] = entry;
+    history->count++;
+    reset_command_history_navigation(history);
+    return 0;
+}
+
+static int navigate_command_history(
+    CommandHistory *history,
+    int direction,
+    const char *current_buffer,
+    char *buffer,
+    size_t buffer_size)
+{
+    if (history == NULL || buffer == NULL || buffer_size == 0 || history->count <= 0)
+    {
+        return 0;
+    }
+
+    if (direction < 0)
+    {
+        if (history->browse_index < 0)
+        {
+            set_command_buffer(history->draft, sizeof(history->draft), current_buffer);
+            history->has_draft = 1;
+            history->browse_index = history->count - 1;
+        }
+        else if (history->browse_index > 0)
+        {
+            history->browse_index--;
+        }
+
+        set_command_buffer(buffer, buffer_size, history->entries[history->browse_index]);
+        return 1;
+    }
+
+    if (direction > 0)
+    {
+        if (history->browse_index < 0)
+        {
+            return 0;
+        }
+
+        if (history->browse_index + 1 < history->count)
+        {
+            history->browse_index++;
+            set_command_buffer(buffer, buffer_size, history->entries[history->browse_index]);
+        }
+        else
+        {
+            history->browse_index = -1;
+            set_command_buffer(buffer, buffer_size, history->has_draft ? history->draft : "");
+            history->has_draft = 0;
+            history->draft[0] = '\0';
+        }
+
+        return 1;
+    }
+
+    return 0;
 }
 
 static int starts_with_ignore_case(const char *text, const char *prefix)
@@ -1527,7 +1688,11 @@ static void redraw_prompt_line(const char *prompt, const char *buffer, size_t *p
     *previous_length = current_length;
 }
 
-static int read_interactive_line(char *buffer, size_t buffer_size, const char *prompt)
+static int read_interactive_line(
+    char *buffer,
+    size_t buffer_size,
+    const char *prompt,
+    CommandHistory *history)
 {
     CompletionSession completion_session;
 
@@ -1566,7 +1731,19 @@ static int read_interactive_line(char *buffer, size_t buffer_size, const char *p
 
             if (character == 0 || character == 224)
             {
-                _getch();
+                int special_key = _getch();
+
+                if (special_key == 72 || special_key == 80)
+                {
+                    int direction = special_key == 72 ? -1 : 1;
+
+                    if (navigate_command_history(history, direction, buffer, buffer, buffer_size))
+                    {
+                        reset_completion_session(&completion_session);
+                        redraw_prompt_line(prompt, buffer, &previous_length);
+                    }
+                }
+
                 continue;
             }
 
@@ -1581,6 +1758,7 @@ static int read_interactive_line(char *buffer, size_t buffer_size, const char *p
             {
                 if (apply_completion(buffer, buffer_size, &completion_session))
                 {
+                    reset_command_history_navigation(history);
                     redraw_prompt_line(prompt, buffer, &previous_length);
                 }
 
@@ -1593,6 +1771,7 @@ static int read_interactive_line(char *buffer, size_t buffer_size, const char *p
                 {
                     buffer[length - 1] = '\0';
                     reset_completion_session(&completion_session);
+                    reset_command_history_navigation(history);
                     redraw_prompt_line(prompt, buffer, &previous_length);
                 }
 
@@ -1606,6 +1785,7 @@ static int read_interactive_line(char *buffer, size_t buffer_size, const char *p
                     buffer[length] = (char)character;
                     buffer[length + 1] = '\0';
                     reset_completion_session(&completion_session);
+                    reset_command_history_navigation(history);
                     redraw_prompt_line(prompt, buffer, &previous_length);
                 }
             }
@@ -2297,7 +2477,11 @@ static int execute_tokens(Session *session, int argc, char **argv)
 
 static int run_interactive_console(Session *session)
 {
+    CommandHistory history;
     char line[MAX_COMMAND_LENGTH];
+    int result = 0;
+
+    initialize_command_history(&history);
 
     printf("wav mini-console\n");
     printf("Type 'help' for commands and 'exit' or 'quit' to leave.\n");
@@ -2309,10 +2493,11 @@ static int run_interactive_console(Session *session)
         int token_count;
         char *command;
 
-        if (read_interactive_line(line, sizeof(line), "wav> ") <= 0)
+        if (read_interactive_line(line, sizeof(line), "wav> ", &history) <= 0)
         {
-            return 0;
+            break;
         }
+
         command = trim_whitespace(line);
 
         if (*command == '\0')
@@ -2320,9 +2505,14 @@ static int run_interactive_console(Session *session)
             continue;
         }
 
+        if (add_command_history_entry(&history, command) != 0)
+        {
+            fprintf(stderr, "Warning: unable to store command history.\n");
+        }
+
         if (equals_ignore_case(command, "exit") || equals_ignore_case(command, "quit"))
         {
-            return 0;
+            break;
         }
 
         if (matches_command_name_ignore_case(command, "preset", &preset_definition))
@@ -2340,6 +2530,9 @@ static int run_interactive_console(Session *session)
 
         execute_tokens(session, token_count, tokens);
     }
+
+    free_command_history(&history);
+    return result;
 }
 
 static int run_direct_command_shortcut(Session *session, int argc, char **argv)
