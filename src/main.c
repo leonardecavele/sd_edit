@@ -1,5 +1,7 @@
 #include <ctype.h>
+#include <conio.h>
 #include <errno.h>
+#include <io.h>
 #include <limits.h>
 #include <process.h>
 #include <stdio.h>
@@ -16,6 +18,7 @@
 
 #define PRESET_STORE_PATH "presets.txt"
 #define MAX_COMMAND_LENGTH 4096
+#define MAX_COMPLETION_TOKENS 4
 #define MAX_OUTPUT_PATH 1024
 #define MAX_PRESET_NAME 128
 #define SNDFILE_DLL_RELATIVE_PATH "libsndfile-1.2.2-win64\\bin\\sndfile.dll"
@@ -44,6 +47,17 @@ typedef struct
     Preset current_preset;
     int has_current_preset;
 } Session;
+
+static const char *g_command_catalog[] = {
+    "help",
+    "do",
+    "play",
+    "preset",
+    "save",
+    "show",
+    "exit",
+    "quit"
+};
 
 static SndfileRuntime g_sndfile_runtime;
 
@@ -476,6 +490,1129 @@ static int split_command_line(char *line, char **tokens, int max_tokens)
     return count;
 }
 
+typedef enum
+{
+    COMPLETE_NONE,
+    COMPLETE_INVALID,
+    COMPLETE_COMMAND,
+    COMPLETE_DO_FILE,
+    COMPLETE_DO_PRESET,
+    COMPLETE_PLAY_FILE,
+    COMPLETE_SAVE_SUBCOMMAND,
+    COMPLETE_SAVE_PRESET_NAME,
+    COMPLETE_SHOW_SUBCOMMAND
+} CompletionContext;
+
+typedef struct
+{
+    size_t start;
+    size_t end;
+    size_t after_end;
+    char quote;
+} CompletionToken;
+
+typedef struct
+{
+    int token_count;
+    int ends_with_whitespace;
+    size_t current_token_start;
+    size_t current_token_end;
+    size_t current_token_after_end;
+    char token_quote;
+    char active_quote;
+    CompletionContext context;
+} CompletionParseResult;
+
+typedef struct
+{
+    int active;
+    CompletionContext context;
+    size_t token_start;
+    size_t token_end;
+    size_t token_after_end;
+    char token_quote;
+    char **matches;
+    int match_count;
+    int cycle_index;
+    char last_buffer[MAX_COMMAND_LENGTH];
+} CompletionSession;
+
+static char *duplicate_string(const char *text)
+{
+    size_t length;
+    char *copy;
+
+    if (text == NULL)
+    {
+        return NULL;
+    }
+
+    length = strlen(text);
+    copy = malloc(length + 1);
+
+    if (copy == NULL)
+    {
+        return NULL;
+    }
+
+    memcpy(copy, text, length + 1);
+    return copy;
+}
+
+static int starts_with_ignore_case(const char *text, const char *prefix)
+{
+    if (text == NULL || prefix == NULL)
+    {
+        return 0;
+    }
+
+    while (*prefix != '\0')
+    {
+        if (*text == '\0')
+        {
+            return 0;
+        }
+
+        if (tolower((unsigned char)*text) != tolower((unsigned char)*prefix))
+        {
+            return 0;
+        }
+
+        text++;
+        prefix++;
+    }
+
+    return 1;
+}
+
+static void free_completion_matches(char **matches, int count)
+{
+    if (matches == NULL)
+    {
+        return;
+    }
+
+    for (int index = 0; index < count; index++)
+    {
+        free(matches[index]);
+    }
+
+    free(matches);
+}
+
+static void reset_completion_session(CompletionSession *session)
+{
+    if (session == NULL)
+    {
+        return;
+    }
+
+    free_completion_matches(session->matches, session->match_count);
+    memset(session, 0, sizeof(*session));
+}
+
+static int append_completion_match(char ***matches, int *count, int *capacity, const char *value)
+{
+    char **resized_matches;
+    char *value_copy;
+
+    if (matches == NULL || count == NULL || capacity == NULL || value == NULL)
+    {
+        return -1;
+    }
+
+    if (*count >= *capacity)
+    {
+        int new_capacity = *capacity > 0 ? *capacity * 2 : 8;
+
+        resized_matches = realloc(*matches, sizeof(char *) * (size_t)new_capacity);
+
+        if (resized_matches == NULL)
+        {
+            return -1;
+        }
+
+        *matches = resized_matches;
+        *capacity = new_capacity;
+    }
+
+    value_copy = duplicate_string(value);
+
+    if (value_copy == NULL)
+    {
+        return -1;
+    }
+
+    (*matches)[*count] = value_copy;
+    (*count)++;
+    return 0;
+}
+
+static int token_equals_ignore_case(const char *line, const CompletionToken *token, const char *value)
+{
+    size_t index;
+    size_t length;
+
+    if (line == NULL || token == NULL || value == NULL)
+    {
+        return 0;
+    }
+
+    length = strlen(value);
+
+    if ((token->end - token->start) != length)
+    {
+        return 0;
+    }
+
+    for (index = 0; index < length; index++)
+    {
+        if (tolower((unsigned char)line[token->start + index]) != tolower((unsigned char)value[index]))
+        {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int copy_token_text(
+    const char *line,
+    size_t start,
+    size_t end,
+    char *output,
+    size_t output_size)
+{
+    size_t length;
+
+    if (line == NULL || output == NULL || output_size == 0 || end < start)
+    {
+        return -1;
+    }
+
+    length = end - start;
+
+    if (length + 1 > output_size)
+    {
+        return -1;
+    }
+
+    memcpy(output, line + start, length);
+    output[length] = '\0';
+    return 0;
+}
+
+static int parse_completion_state(const char *line, CompletionParseResult *result)
+{
+    CompletionToken tokens[MAX_COMPLETION_TOKENS];
+    size_t line_length;
+    size_t cursor = 0;
+    int token_count = 0;
+    int current_token_index;
+    int token_overflow = 0;
+
+    if (line == NULL || result == NULL)
+    {
+        return -1;
+    }
+
+    memset(result, 0, sizeof(*result));
+    line_length = strlen(line);
+    result->current_token_start = line_length;
+    result->current_token_end = line_length;
+    result->current_token_after_end = line_length;
+    result->context = COMPLETE_COMMAND;
+
+    while (line[cursor] != '\0')
+    {
+        char quote = '\0';
+
+        while (line[cursor] != '\0' && isspace((unsigned char)line[cursor]))
+        {
+            cursor++;
+        }
+
+        if (line[cursor] == '\0')
+        {
+            break;
+        }
+
+        if (token_count >= MAX_COMPLETION_TOKENS)
+        {
+            token_overflow = 1;
+            break;
+        }
+
+        if (line[cursor] == '"' || line[cursor] == '\'')
+        {
+            quote = line[cursor];
+            cursor++;
+        }
+
+        tokens[token_count].start = cursor;
+        tokens[token_count].quote = quote;
+
+        if (quote != '\0')
+        {
+            while (line[cursor] != '\0' && line[cursor] != quote)
+            {
+                cursor++;
+            }
+
+            tokens[token_count].end = cursor;
+            tokens[token_count].after_end = cursor;
+
+            if (line[cursor] == quote)
+            {
+                tokens[token_count].after_end = cursor + 1;
+                cursor++;
+            }
+        }
+        else
+        {
+            while (line[cursor] != '\0' && !isspace((unsigned char)line[cursor]))
+            {
+                cursor++;
+            }
+
+            tokens[token_count].end = cursor;
+            tokens[token_count].after_end = cursor;
+        }
+
+        token_count++;
+    }
+
+    result->token_count = token_overflow ? MAX_COMPLETION_TOKENS + 1 : token_count;
+    result->ends_with_whitespace =
+        line_length > 0 && isspace((unsigned char)line[line_length - 1]);
+
+    if (token_overflow)
+    {
+        result->context = COMPLETE_INVALID;
+        return 0;
+    }
+
+    if (token_count == 0 || result->ends_with_whitespace)
+    {
+        current_token_index = token_count;
+    }
+    else
+    {
+        CompletionToken *current_token = &tokens[token_count - 1];
+
+        result->current_token_start = current_token->start;
+        result->current_token_end = current_token->end;
+        result->current_token_after_end = current_token->after_end;
+        result->token_quote = current_token->quote;
+
+        if (current_token->quote != '\0' && current_token->after_end == current_token->end)
+        {
+            result->active_quote = current_token->quote;
+        }
+
+        current_token_index = token_count - 1;
+    }
+
+    if (token_count == 0)
+    {
+        result->context = COMPLETE_COMMAND;
+        return 0;
+    }
+
+    if (current_token_index == 0)
+    {
+        result->context = COMPLETE_COMMAND;
+        return 0;
+    }
+
+    if (token_equals_ignore_case(line, &tokens[0], "do"))
+    {
+        result->context =
+            current_token_index == 1 ? COMPLETE_DO_FILE :
+            current_token_index == 2 ? COMPLETE_DO_PRESET :
+            COMPLETE_INVALID;
+        return 0;
+    }
+
+    if (token_equals_ignore_case(line, &tokens[0], "play"))
+    {
+        result->context = current_token_index == 1 ? COMPLETE_PLAY_FILE : COMPLETE_INVALID;
+        return 0;
+    }
+
+    if (token_equals_ignore_case(line, &tokens[0], "preset"))
+    {
+        result->context = COMPLETE_NONE;
+        return 0;
+    }
+
+    if (token_equals_ignore_case(line, &tokens[0], "save"))
+    {
+        if (current_token_index == 1)
+        {
+            result->context = COMPLETE_SAVE_SUBCOMMAND;
+            return 0;
+        }
+
+        if (current_token_index == 2 &&
+            token_count >= 2 &&
+            token_equals_ignore_case(line, &tokens[1], "preset"))
+        {
+            result->context = COMPLETE_SAVE_PRESET_NAME;
+            return 0;
+        }
+
+        result->context = COMPLETE_INVALID;
+        return 0;
+    }
+
+    if (token_equals_ignore_case(line, &tokens[0], "show"))
+    {
+        if (current_token_index == 1)
+        {
+            result->context = COMPLETE_SHOW_SUBCOMMAND;
+            return 0;
+        }
+
+        result->context = COMPLETE_INVALID;
+        return 0;
+    }
+
+    if (token_equals_ignore_case(line, &tokens[0], "help") ||
+        token_equals_ignore_case(line, &tokens[0], "exit") ||
+        token_equals_ignore_case(line, &tokens[0], "quit"))
+    {
+        result->context = COMPLETE_NONE;
+        return 0;
+    }
+
+    result->context = COMPLETE_INVALID;
+    return 0;
+}
+
+static int completion_candidate_is_directory(const char *candidate)
+{
+    size_t length;
+
+    if (candidate == NULL)
+    {
+        return 0;
+    }
+
+    length = strlen(candidate);
+    return length > 0 && (candidate[length - 1] == '\\' || candidate[length - 1] == '/');
+}
+
+static int completion_should_append_space(CompletionContext context, const char *candidate)
+{
+    if (candidate == NULL || completion_candidate_is_directory(candidate))
+    {
+        return 0;
+    }
+
+    switch (context)
+    {
+        case COMPLETE_COMMAND:
+        case COMPLETE_DO_FILE:
+        case COMPLETE_DO_PRESET:
+        case COMPLETE_PLAY_FILE:
+        case COMPLETE_SAVE_SUBCOMMAND:
+        case COMPLETE_SAVE_PRESET_NAME:
+        case COMPLETE_SHOW_SUBCOMMAND:
+            return 1;
+
+        case COMPLETE_NONE:
+        case COMPLETE_INVALID:
+        default:
+            return 0;
+    }
+}
+
+static int replace_completion_token(
+    char *buffer,
+    size_t buffer_size,
+    size_t token_start,
+    size_t token_end,
+    size_t token_after_end,
+    char token_quote,
+    const char *replacement,
+    int close_quote,
+    int append_space,
+    size_t *new_token_end,
+    size_t *new_token_after_end)
+{
+    char rebuilt[MAX_COMMAND_LENGTH];
+    size_t line_length;
+    size_t replacement_length;
+    size_t suffix_length;
+    size_t cursor;
+    const char *suffix;
+    int keep_quote;
+
+    if (buffer == NULL ||
+        replacement == NULL ||
+        token_end < token_start ||
+        token_after_end < token_end ||
+        buffer_size == 0)
+    {
+        return -1;
+    }
+
+    line_length = strlen(buffer);
+
+    if (token_after_end > line_length || buffer_size > sizeof(rebuilt))
+    {
+        return -1;
+    }
+
+    replacement_length = strlen(replacement);
+    suffix = buffer + token_after_end;
+    suffix_length = strlen(suffix);
+    keep_quote = token_quote != '\0' && (close_quote || token_after_end > token_end);
+    cursor = token_start;
+
+    if (token_start > 0)
+    {
+        memcpy(rebuilt, buffer, token_start);
+    }
+
+    if (cursor + replacement_length + 1 > buffer_size)
+    {
+        return -1;
+    }
+
+    memcpy(rebuilt + cursor, replacement, replacement_length);
+    cursor += replacement_length;
+
+    if (keep_quote)
+    {
+        if (cursor + 2 > buffer_size)
+        {
+            return -1;
+        }
+
+        rebuilt[cursor++] = token_quote;
+    }
+
+    if (append_space && (suffix[0] == '\0' || !isspace((unsigned char)suffix[0])))
+    {
+        if (cursor + 2 > buffer_size)
+        {
+            return -1;
+        }
+
+        rebuilt[cursor++] = ' ';
+    }
+
+    if (cursor + suffix_length + 1 > buffer_size)
+    {
+        return -1;
+    }
+
+    memcpy(rebuilt + cursor, suffix, suffix_length + 1);
+    memcpy(buffer, rebuilt, cursor + suffix_length + 1);
+
+    if (new_token_end != NULL)
+    {
+        *new_token_end = token_start + replacement_length;
+    }
+
+    if (new_token_after_end != NULL)
+    {
+        *new_token_after_end = token_start + replacement_length + (keep_quote ? 1 : 0);
+    }
+
+    return 0;
+}
+
+static size_t longest_common_prefix_length(char **matches, int match_count)
+{
+    size_t prefix_length = 0;
+
+    if (matches == NULL || match_count <= 0 || matches[0] == NULL)
+    {
+        return 0;
+    }
+
+    while (matches[0][prefix_length] != '\0')
+    {
+        char reference = (char)tolower((unsigned char)matches[0][prefix_length]);
+
+        for (int index = 1; index < match_count; index++)
+        {
+            if (matches[index] == NULL ||
+                matches[index][prefix_length] == '\0' ||
+                (char)tolower((unsigned char)matches[index][prefix_length]) != reference)
+            {
+                return prefix_length;
+            }
+        }
+
+        prefix_length++;
+    }
+
+    return prefix_length;
+}
+
+static int collect_word_matches(
+    const char *prefix,
+    const char *const *words,
+    size_t word_count,
+    char ***matches,
+    int *match_count,
+    int *match_capacity)
+{
+    if (prefix == NULL || words == NULL || matches == NULL || match_count == NULL || match_capacity == NULL)
+    {
+        return -1;
+    }
+
+    for (size_t index = 0; index < word_count; index++)
+    {
+        if (starts_with_ignore_case(words[index], prefix) &&
+            append_completion_match(matches, match_count, match_capacity, words[index]) != 0)
+        {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+static int collect_named_preset_matches(
+    const char *prefix,
+    char ***matches,
+    int *match_count,
+    int *match_capacity)
+{
+    char **names = NULL;
+    int name_count = 0;
+    int status;
+
+    if (prefix == NULL || matches == NULL || match_count == NULL || match_capacity == NULL)
+    {
+        return -1;
+    }
+
+    status = list_named_presets(PRESET_STORE_PATH, &names, &name_count);
+
+    if (status != 0)
+    {
+        return -1;
+    }
+
+    for (int index = 0; index < name_count; index++)
+    {
+        if (starts_with_ignore_case(names[index], prefix) &&
+            append_completion_match(matches, match_count, match_capacity, names[index]) != 0)
+        {
+            free_named_preset_list(names, name_count);
+            return -1;
+        }
+    }
+
+    free_named_preset_list(names, name_count);
+    return 0;
+}
+
+static void normalize_path_separators(char *path)
+{
+    if (path == NULL)
+    {
+        return;
+    }
+
+    while (*path != '\0')
+    {
+        if (*path == '/')
+        {
+            *path = '\\';
+        }
+
+        path++;
+    }
+}
+
+static int build_directory_search_pattern(
+    const char *directory,
+    char *pattern,
+    size_t pattern_size)
+{
+    size_t directory_length;
+
+    if (directory == NULL || pattern == NULL || pattern_size == 0)
+    {
+        return -1;
+    }
+
+    if (directory[0] == '\0')
+    {
+        return snprintf(pattern, pattern_size, ".\\*") >= (int)pattern_size ? -1 : 0;
+    }
+
+    directory_length = strlen(directory);
+
+    if (directory_length > 0 &&
+        (directory[directory_length - 1] == '\\' || directory[directory_length - 1] == '/'))
+    {
+        return snprintf(pattern, pattern_size, "%s*", directory) >= (int)pattern_size ? -1 : 0;
+    }
+
+    return snprintf(pattern, pattern_size, "%s\\*", directory) >= (int)pattern_size ? -1 : 0;
+}
+
+static int collect_wav_path_matches(
+    const char *prefix,
+    char ***matches,
+    int *match_count,
+    int *match_capacity)
+{
+    WIN32_FIND_DATAA find_data;
+    HANDLE find_handle;
+    char normalized_prefix[MAX_COMMAND_LENGTH];
+    char directory_prefix[MAX_COMMAND_LENGTH];
+    char search_directory[MAX_COMMAND_LENGTH];
+    char search_pattern[MAX_COMMAND_LENGTH];
+    char *last_separator;
+
+    if (prefix == NULL || matches == NULL || match_count == NULL || match_capacity == NULL)
+    {
+        return -1;
+    }
+
+    if (snprintf(normalized_prefix, sizeof(normalized_prefix), "%s", prefix) >= (int)sizeof(normalized_prefix))
+    {
+        return -1;
+    }
+
+    normalize_path_separators(normalized_prefix);
+    directory_prefix[0] = '\0';
+    search_directory[0] = '\0';
+    last_separator = strrchr(normalized_prefix, '\\');
+
+    if (last_separator != NULL)
+    {
+        size_t directory_length = (size_t)(last_separator - normalized_prefix) + 1;
+
+        if (directory_length + 1 > sizeof(directory_prefix))
+        {
+            return -1;
+        }
+
+        memcpy(directory_prefix, normalized_prefix, directory_length);
+        directory_prefix[directory_length] = '\0';
+
+        if (snprintf(search_directory, sizeof(search_directory), "%s", directory_prefix) >= (int)sizeof(search_directory))
+        {
+            return -1;
+        }
+    }
+
+    if (build_directory_search_pattern(search_directory, search_pattern, sizeof(search_pattern)) != 0)
+    {
+        return -1;
+    }
+
+    find_handle = FindFirstFileA(search_pattern, &find_data);
+
+    if (find_handle == INVALID_HANDLE_VALUE)
+    {
+        return 0;
+    }
+
+    do
+    {
+        int is_directory = (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        char candidate[MAX_COMMAND_LENGTH];
+
+        if (strcmp(find_data.cFileName, ".") == 0 || strcmp(find_data.cFileName, "..") == 0)
+        {
+            continue;
+        }
+
+        if (!is_directory && !has_wav_extension(find_data.cFileName))
+        {
+            continue;
+        }
+
+        if (snprintf(
+            candidate,
+            sizeof(candidate),
+            "%s%s%s",
+            directory_prefix,
+            find_data.cFileName,
+            is_directory ? "\\" : "") >= (int)sizeof(candidate))
+        {
+            continue;
+        }
+
+        if (starts_with_ignore_case(candidate, normalized_prefix) &&
+            append_completion_match(matches, match_count, match_capacity, candidate) != 0)
+        {
+            FindClose(find_handle);
+            return -1;
+        }
+    }
+    while (FindNextFileA(find_handle, &find_data) != 0);
+
+    FindClose(find_handle);
+    return 0;
+}
+
+static int collect_completion_matches(
+    const char *buffer,
+    const CompletionParseResult *parse,
+    char ***matches,
+    int *match_count)
+{
+    char prefix[MAX_COMMAND_LENGTH];
+    int match_capacity = 0;
+    static const char *g_preset_subcommand[] = { "preset" };
+
+    if (buffer == NULL || parse == NULL || matches == NULL || match_count == NULL)
+    {
+        return -1;
+    }
+
+    *matches = NULL;
+    *match_count = 0;
+
+    if (copy_token_text(
+        buffer,
+        parse->current_token_start,
+        parse->current_token_end,
+        prefix,
+        sizeof(prefix)) != 0)
+    {
+        return -1;
+    }
+
+    switch (parse->context)
+    {
+        case COMPLETE_COMMAND:
+            return collect_word_matches(
+                prefix,
+                g_command_catalog,
+                sizeof(g_command_catalog) / sizeof(g_command_catalog[0]),
+                matches,
+                match_count,
+                &match_capacity
+            );
+
+        case COMPLETE_DO_FILE:
+        case COMPLETE_PLAY_FILE:
+            return collect_wav_path_matches(prefix, matches, match_count, &match_capacity);
+
+        case COMPLETE_DO_PRESET:
+        case COMPLETE_SAVE_PRESET_NAME:
+            return collect_named_preset_matches(prefix, matches, match_count, &match_capacity);
+
+        case COMPLETE_SAVE_SUBCOMMAND:
+        case COMPLETE_SHOW_SUBCOMMAND:
+            return collect_word_matches(
+                prefix,
+                g_preset_subcommand,
+                sizeof(g_preset_subcommand) / sizeof(g_preset_subcommand[0]),
+                matches,
+                match_count,
+                &match_capacity
+            );
+
+        case COMPLETE_NONE:
+        case COMPLETE_INVALID:
+        default:
+            return 0;
+    }
+}
+
+static int apply_completion(char *buffer, size_t buffer_size, CompletionSession *session)
+{
+    CompletionParseResult parse;
+    char **matches = NULL;
+    int match_count = 0;
+    size_t new_token_end = 0;
+    size_t new_token_after_end = 0;
+
+    if (buffer == NULL || session == NULL || buffer_size == 0)
+    {
+        return 0;
+    }
+
+    if (session->active &&
+        session->match_count > 1 &&
+        strcmp(buffer, session->last_buffer) == 0)
+    {
+        const char *candidate = session->matches[(session->cycle_index + 1) % session->match_count];
+        int append_space = completion_should_append_space(session->context, candidate);
+        int close_quote =
+            session->token_quote != '\0' &&
+            session->token_after_end == session->token_end &&
+            append_space;
+
+        if (replace_completion_token(
+            buffer,
+            buffer_size,
+            session->token_start,
+            session->token_end,
+            session->token_after_end,
+            session->token_quote,
+            candidate,
+            close_quote,
+            append_space,
+            &new_token_end,
+            &new_token_after_end) != 0)
+        {
+            reset_completion_session(session);
+            return 0;
+        }
+
+        session->token_end = new_token_end;
+        session->token_after_end = new_token_after_end;
+        session->cycle_index = (session->cycle_index + 1) % session->match_count;
+        snprintf(session->last_buffer, sizeof(session->last_buffer), "%s", buffer);
+        return 1;
+    }
+
+    reset_completion_session(session);
+
+    if (parse_completion_state(buffer, &parse) != 0 ||
+        parse.context == COMPLETE_NONE ||
+        parse.context == COMPLETE_INVALID)
+    {
+        return 0;
+    }
+
+    if (collect_completion_matches(buffer, &parse, &matches, &match_count) != 0)
+    {
+        free_completion_matches(matches, match_count);
+        return 0;
+    }
+
+    if (match_count <= 0)
+    {
+        free_completion_matches(matches, match_count);
+        return 0;
+    }
+
+    if (match_count == 1)
+    {
+        const char *candidate = matches[0];
+        int append_space = completion_should_append_space(parse.context, candidate);
+        int close_quote =
+            parse.token_quote != '\0' &&
+            parse.current_token_after_end == parse.current_token_end &&
+            append_space;
+        int changed;
+
+        changed = replace_completion_token(
+            buffer,
+            buffer_size,
+            parse.current_token_start,
+            parse.current_token_end,
+            parse.current_token_after_end,
+            parse.token_quote,
+            candidate,
+            close_quote,
+            append_space,
+            NULL,
+            NULL) == 0;
+        free_completion_matches(matches, match_count);
+        return changed;
+    }
+
+    {
+        size_t prefix_length = parse.current_token_end - parse.current_token_start;
+        size_t common_prefix_length = longest_common_prefix_length(matches, match_count);
+
+        if (common_prefix_length > prefix_length)
+        {
+            char common_prefix[MAX_COMMAND_LENGTH];
+
+            if (common_prefix_length + 1 > sizeof(common_prefix))
+            {
+                free_completion_matches(matches, match_count);
+                return 0;
+            }
+
+            memcpy(common_prefix, matches[0], common_prefix_length);
+            common_prefix[common_prefix_length] = '\0';
+
+            if (replace_completion_token(
+                buffer,
+                buffer_size,
+                parse.current_token_start,
+                parse.current_token_end,
+                parse.current_token_after_end,
+                parse.token_quote,
+                common_prefix,
+                0,
+                0,
+                &new_token_end,
+                &new_token_after_end) != 0)
+            {
+                free_completion_matches(matches, match_count);
+                return 0;
+            }
+        }
+        else
+        {
+            new_token_end = parse.current_token_end;
+            new_token_after_end = parse.current_token_after_end;
+        }
+    }
+
+    session->active = 1;
+    session->context = parse.context;
+    session->token_start = parse.current_token_start;
+    session->token_end = new_token_end;
+    session->token_after_end = new_token_after_end;
+    session->token_quote = parse.token_quote;
+    session->matches = matches;
+    session->match_count = match_count;
+    session->cycle_index = -1;
+    snprintf(session->last_buffer, sizeof(session->last_buffer), "%s", buffer);
+    return 1;
+}
+
+static int prompt_supports_completion(void)
+{
+    HANDLE input_handle;
+    HANDLE output_handle;
+    DWORD input_mode;
+    DWORD output_mode;
+
+    if (_fileno(stdin) < 0 || _fileno(stdout) < 0 || !_isatty(_fileno(stdin)) || !_isatty(_fileno(stdout)))
+    {
+        return 0;
+    }
+
+    input_handle = GetStdHandle(STD_INPUT_HANDLE);
+    output_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+
+    if (input_handle == NULL ||
+        input_handle == INVALID_HANDLE_VALUE ||
+        output_handle == NULL ||
+        output_handle == INVALID_HANDLE_VALUE)
+    {
+        return 0;
+    }
+
+    return GetConsoleMode(input_handle, &input_mode) != 0 &&
+        GetConsoleMode(output_handle, &output_mode) != 0;
+}
+
+static void redraw_prompt_line(const char *prompt, const char *buffer, size_t *previous_length)
+{
+    size_t current_length;
+
+    if (prompt == NULL || buffer == NULL || previous_length == NULL)
+    {
+        return;
+    }
+
+    current_length = strlen(prompt) + strlen(buffer);
+    printf("\r%s%s", prompt, buffer);
+
+    if (*previous_length > current_length)
+    {
+        for (size_t index = current_length; index < *previous_length; index++)
+        {
+            putchar(' ');
+        }
+
+        printf("\r%s%s", prompt, buffer);
+    }
+
+    fflush(stdout);
+    *previous_length = current_length;
+}
+
+static int read_interactive_line(char *buffer, size_t buffer_size, const char *prompt)
+{
+    CompletionSession completion_session;
+
+    if (buffer == NULL || buffer_size == 0 || prompt == NULL)
+    {
+        return -1;
+    }
+
+    if (!prompt_supports_completion())
+    {
+        printf("%s", prompt);
+        fflush(stdout);
+
+        if (fgets(buffer, (int)buffer_size, stdin) == NULL)
+        {
+            putchar('\n');
+            return 0;
+        }
+
+        buffer[strcspn(buffer, "\r\n")] = '\0';
+        return 1;
+    }
+
+    memset(&completion_session, 0, sizeof(completion_session));
+    buffer[0] = '\0';
+
+    {
+        size_t previous_length = 0;
+
+        redraw_prompt_line(prompt, buffer, &previous_length);
+
+        while (1)
+        {
+            int character = _getch();
+            size_t length = strlen(buffer);
+
+            if (character == 0 || character == 224)
+            {
+                _getch();
+                continue;
+            }
+
+            if (character == '\r')
+            {
+                reset_completion_session(&completion_session);
+                putchar('\n');
+                return 1;
+            }
+
+            if (character == '\t')
+            {
+                if (apply_completion(buffer, buffer_size, &completion_session))
+                {
+                    redraw_prompt_line(prompt, buffer, &previous_length);
+                }
+
+                continue;
+            }
+
+            if (character == '\b')
+            {
+                if (length > 0)
+                {
+                    buffer[length - 1] = '\0';
+                    reset_completion_session(&completion_session);
+                    redraw_prompt_line(prompt, buffer, &previous_length);
+                }
+
+                continue;
+            }
+
+            if (character >= 32 && character != 127)
+            {
+                if (length + 1 < buffer_size)
+                {
+                    buffer[length] = (char)character;
+                    buffer[length + 1] = '\0';
+                    reset_completion_session(&completion_session);
+                    redraw_prompt_line(prompt, buffer, &previous_length);
+                }
+            }
+        }
+    }
+}
+
 static void print_preset(const Preset *preset)
 {
     if (preset == NULL || preset->nb_seg <= 0 || preset->segments == NULL)
@@ -519,6 +1656,7 @@ static void print_usage(void)
     printf("  quit\n");
     printf("\n");
     printf("Run main.exe with no arguments to open the prompt.\n");
+    printf("In prompt mode, press Tab to complete commands, .wav paths, subcommands, and preset names.\n");
     printf("Direct invocation shortcuts are also supported, for example:\n");
     printf("  main.exe help\n");
     printf("  main.exe do <file.wav>\n");
@@ -1167,19 +2305,14 @@ static int run_interactive_console(Session *session)
     while (1)
     {
         const char *preset_definition;
-        char *tokens[4];
+        char *tokens[MAX_COMPLETION_TOKENS];
         int token_count;
         char *command;
 
-        printf("wav> ");
-
-        if (fgets(line, sizeof(line), stdin) == NULL)
+        if (read_interactive_line(line, sizeof(line), "wav> ") <= 0)
         {
-            putchar('\n');
             return 0;
         }
-
-        line[strcspn(line, "\r\n")] = '\0';
         command = trim_whitespace(line);
 
         if (*command == '\0')
@@ -1198,7 +2331,7 @@ static int run_interactive_console(Session *session)
             continue;
         }
 
-        token_count = split_command_line(command, tokens, 4);
+        token_count = split_command_line(command, tokens, MAX_COMPLETION_TOKENS);
 
         if (token_count == 0)
         {

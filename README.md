@@ -154,6 +154,15 @@ wav>
 
 Run `help` at the prompt to print the full command list plus the currently registered effect catalog.
 
+The prompt also supports `Tab` completion. It completes:
+
+- command words in the first token
+- `.wav` paths after `do ` and `play `
+- the `preset` subcommand after `save ` and `show `
+- saved preset names after `do <file.wav> ` and `save preset `
+
+When there are multiple matches, the first `Tab` extends to the longest common prefix and repeated `Tab` presses cycle concrete matches in place. The `preset <definition>` grammar stays free-form, so `Tab` does not try to complete numeric segment definitions.
+
 Supported prompt commands:
 
 - `help`
@@ -212,6 +221,8 @@ wav> exit
 ```
 
 The prompt is the intended way to chain commands that depend on session state. In particular, `show preset` and `save preset <name>` only operate on the current in-memory preset held by the running process.
+
+If a path contains spaces, start the token with a quote before using `Tab`, for example `do "path with spaces\\te`.
 
 ### Direct invocation shortcuts
 
@@ -303,6 +314,7 @@ Current persistence behavior:
 - every save writes one new line
 - there is no in-place update or deduplication
 - preset names cannot contain `|`, carriage returns, or newlines
+- `Tab` completion reads the same store, but free-form names are still allowed if you keep typing manually
 
 When loading a named preset:
 
@@ -310,6 +322,8 @@ When loading a named preset:
 - invalid lines are skipped
 - the parsed segment count must match the stored `segment_count`
 - if the same preset name appears multiple times, the latest valid matching entry wins
+
+Prompt completion follows the same validation rules. Invalid lines do not contribute suggestions, and duplicate preset names appear at most once in the suggestion set using the latest valid stored definition.
 
 In other words, duplicate preset names resolve to the last valid saved line for that name.
 

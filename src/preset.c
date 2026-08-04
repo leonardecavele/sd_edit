@@ -13,6 +13,7 @@
 #define MIN_MIX_PERCENT 25
 #define MAX_MIX_PERCENT 100
 #define PRESET_NAME_SEPARATOR '|'
+#define PRESET_STORE_LINE_LENGTH 4096
 
 static char *duplicate_string(const char *text)
 {
@@ -215,6 +216,114 @@ int copy_preset(Preset *destination, const Preset *source)
     return 0;
 }
 
+static int parse_named_preset_line(char *line, char **preset_name, Preset *preset)
+{
+    char *name_separator;
+    char *count_separator;
+    char *count_text;
+    char *definition_text;
+    char *end;
+    long expected_count;
+
+    if (line == NULL || preset_name == NULL || preset == NULL)
+    {
+        return -1;
+    }
+
+    *preset_name = NULL;
+    init_preset(preset);
+    line[strcspn(line, "\r\n")] = '\0';
+
+    name_separator = strchr(line, PRESET_NAME_SEPARATOR);
+
+    if (name_separator == NULL)
+    {
+        return -1;
+    }
+
+    *name_separator = '\0';
+    count_separator = strchr(name_separator + 1, PRESET_NAME_SEPARATOR);
+
+    if (count_separator == NULL)
+    {
+        return -1;
+    }
+
+    *count_separator = '\0';
+    *preset_name = trim_whitespace(line);
+    count_text = trim_whitespace(name_separator + 1);
+    definition_text = trim_whitespace(count_separator + 1);
+
+    expected_count = strtol(count_text, &end, 10);
+
+    if (**preset_name == '\0' ||
+        *count_text == '\0' ||
+        *trim_whitespace(end) != '\0' ||
+        expected_count <= 0 ||
+        expected_count > INT_MAX)
+    {
+        return -1;
+    }
+
+    if (parse_preset_definition(definition_text, preset) != 0)
+    {
+        return -1;
+    }
+
+    if (preset->nb_seg != (int)expected_count)
+    {
+        free_preset(preset);
+        return -1;
+    }
+
+    return 0;
+}
+
+static int append_preset_name(char ***names, int *count, int *capacity, const char *name)
+{
+    char **resized_names;
+    char *name_copy;
+
+    if (names == NULL || count == NULL || capacity == NULL || name == NULL)
+    {
+        return -1;
+    }
+
+    for (int index = 0; index < *count; index++)
+    {
+        if (strcmp((*names)[index], name) == 0)
+        {
+            return 0;
+        }
+    }
+
+    if (*count >= *capacity)
+    {
+        int new_capacity = *capacity > 0 ? *capacity * 2 : 8;
+
+        resized_names = realloc(*names, sizeof(char *) * (size_t)new_capacity);
+
+        if (resized_names == NULL)
+        {
+            return -1;
+        }
+
+        *names = resized_names;
+        *capacity = new_capacity;
+    }
+
+    name_copy = duplicate_string(name);
+
+    if (name_copy == NULL)
+    {
+        return -1;
+    }
+
+    (*names)[*count] = name_copy;
+    (*count)++;
+    return 0;
+}
+
 int parse_preset_definition(const char *definition, Preset *preset)
 {
     Preset parsed;
@@ -321,7 +430,7 @@ int save_named_preset(const char *file_path, const char *name, const Preset *pre
 int load_named_preset(const char *file_path, const char *name, Preset *preset)
 {
     FILE *file;
-    char line[4096];
+    char line[PRESET_STORE_LINE_LENGTH];
     Preset latest_match;
     int found = 0;
 
@@ -341,57 +450,14 @@ int load_named_preset(const char *file_path, const char *name, Preset *preset)
 
     while (fgets(line, sizeof(line), file) != NULL)
     {
-        char *name_separator;
-        char *count_separator;
         char *preset_name;
-        char *count_text;
-        char *definition_text;
         Preset parsed;
-        char *end;
-        long expected_count;
-
-        line[strcspn(line, "\r\n")] = '\0';
-
-        name_separator = strchr(line, PRESET_NAME_SEPARATOR);
-
-        if (name_separator == NULL)
+        if (parse_named_preset_line(line, &preset_name, &parsed) != 0)
         {
             continue;
         }
-
-        *name_separator = '\0';
-        count_separator = strchr(name_separator + 1, PRESET_NAME_SEPARATOR);
-
-        if (count_separator == NULL)
-        {
-            continue;
-        }
-
-        *count_separator = '\0';
-        preset_name = trim_whitespace(line);
-        count_text = trim_whitespace(name_separator + 1);
-        definition_text = trim_whitespace(count_separator + 1);
 
         if (strcmp(preset_name, name) != 0)
-        {
-            continue;
-        }
-
-        expected_count = strtol(count_text, &end, 10);
-
-        if (*count_text == '\0' || *trim_whitespace(end) != '\0' || expected_count <= 0 || expected_count > INT_MAX)
-        {
-            continue;
-        }
-
-        init_preset(&parsed);
-
-        if (parse_preset_definition(definition_text, &parsed) != 0)
-        {
-            continue;
-        }
-
-        if (parsed.nb_seg != (int)expected_count)
         {
             free_preset(&parsed);
             continue;
@@ -413,6 +479,69 @@ int load_named_preset(const char *file_path, const char *name, Preset *preset)
     free_preset(preset);
     *preset = latest_match;
     return 0;
+}
+
+int list_named_presets(const char *file_path, char ***names, int *count)
+{
+    FILE *file;
+    char line[PRESET_STORE_LINE_LENGTH];
+    char **found_names = NULL;
+    int found_count = 0;
+    int found_capacity = 0;
+
+    if (file_path == NULL || names == NULL || count == NULL)
+    {
+        return -1;
+    }
+
+    *names = NULL;
+    *count = 0;
+    file = fopen(file_path, "r");
+
+    if (file == NULL)
+    {
+        return 0;
+    }
+
+    while (fgets(line, sizeof(line), file) != NULL)
+    {
+        char *preset_name;
+        Preset parsed;
+
+        if (parse_named_preset_line(line, &preset_name, &parsed) != 0)
+        {
+            continue;
+        }
+
+        free_preset(&parsed);
+
+        if (append_preset_name(&found_names, &found_count, &found_capacity, preset_name) != 0)
+        {
+            fclose(file);
+            free_named_preset_list(found_names, found_count);
+            return -1;
+        }
+    }
+
+    fclose(file);
+    *names = found_names;
+    *count = found_count;
+    return 0;
+}
+
+void free_named_preset_list(char **names, int count)
+{
+    if (names == NULL)
+    {
+        return;
+    }
+
+    for (int index = 0; index < count; index++)
+    {
+        free(names[index]);
+    }
+
+    free(names);
 }
 
 int generate_random_preset(Preset *preset, sf_count_t total_frames, int sample_rate, int channels)
