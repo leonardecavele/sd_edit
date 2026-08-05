@@ -139,3 +139,12 @@ sd_edit.exe play audio\test.wav
 - libsndfile-compatible file I/O
 - preset-first workflow
 - small, testable CLI changes
+
+### After Thoughts
+
+This experiment showed me that agentic development works better when the architecture is defined before implementation. 
+
+Next time, I would:  
+* Plan the modules and their responsibilities early, making it easier to divide the work cleanly between multiple AI agents.
+* Design the actual code structure, not just the project’s high-level logical components. This would keep files focused and prevent the codebase from ending up as a few 3,000-line files.
+* Assign dedicated agents to review code produced by other agents, focusing on correctness, consistency, and maintainability.
