@@ -5,7 +5,7 @@ CC = gcc
 
 SRC = src/main.c src/effects.c src/preset.c
 OBJ = $(SRC:.c=.o)
-OUT = main.exe
+OUT = sd_edit.exe
 
 FILE = "${NAME}.wav"
 

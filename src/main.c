@@ -22,6 +22,11 @@
 #define MAX_COMMAND_HISTORY 100
 #define MAX_OUTPUT_PATH 1024
 #define MAX_PRESET_NAME 128
+#define DEFAULT_RANDOMNESS 5
+#define MIN_RANDOMNESS 0
+#define MAX_RANDOMNESS 10
+#define PROGRAM_NAME "sd_edit"
+#define PROGRAM_EXECUTABLE_NAME "sd_edit.exe"
 #define SNDFILE_DLL_RELATIVE_PATH "libsndfile-1.2.2-win64\\bin\\sndfile.dll"
 #define PLAY_COMMAND_RELATIVE_PATH "libsndfile-1.2.2-win64\\bin\\sndfile-play.exe"
 
@@ -47,6 +52,7 @@ typedef struct
 {
     Preset current_preset;
     int has_current_preset;
+    char current_preset_name[MAX_PRESET_NAME];
 } Session;
 
 static const char *g_command_catalog[] = {
@@ -54,10 +60,33 @@ static const char *g_command_catalog[] = {
     "do",
     "play",
     "preset",
-    "save",
     "show",
     "exit",
     "quit"
+};
+
+static const char *g_preset_subcommand_catalog[] = {
+    "random",
+    "load",
+    "save"
+};
+
+static const char *g_show_subcommand_catalog[] = {
+    "preset"
+};
+
+static const char *g_randomness_catalog[] = {
+    "0",
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "10"
 };
 
 static SndfileRuntime g_sndfile_runtime;
@@ -142,7 +171,7 @@ static int initialize_sndfile_runtime(void)
         snprintf(
             g_sndfile_runtime.error_message,
             sizeof(g_sndfile_runtime.error_message),
-            "Unable to resolve the bundled sndfile.dll path relative to main.exe."
+            "Unable to resolve the bundled sndfile.dll path relative to sd_edit.exe."
         );
         return -1;
     }
@@ -289,6 +318,7 @@ static void init_session(Session *session)
 
     init_preset(&session->current_preset);
     session->has_current_preset = 0;
+    session->current_preset_name[0] = '\0';
 }
 
 static void free_session(Session *session)
@@ -300,6 +330,23 @@ static void free_session(Session *session)
 
     free_preset(&session->current_preset);
     session->has_current_preset = 0;
+    session->current_preset_name[0] = '\0';
+}
+
+static void set_current_preset_name(Session *session, const char *name)
+{
+    if (session == NULL)
+    {
+        return;
+    }
+
+    if (name == NULL || *name == '\0')
+    {
+        session->current_preset_name[0] = '\0';
+        return;
+    }
+
+    snprintf(session->current_preset_name, sizeof(session->current_preset_name), "%s", name);
 }
 
 static int is_space_or_empty(const char *text)
@@ -373,44 +420,33 @@ static int equals_ignore_case(const char *left, const char *right)
     return *left == '\0' && *right == '\0';
 }
 
-static int matches_command_name_ignore_case(const char *line, const char *command_name, const char **remainder)
+static int parse_integer_value(const char *text, int *value)
 {
-    const char *cursor;
+    char *end;
+    long parsed;
+    char *trimmed_end;
 
-    if (line == NULL || command_name == NULL)
+    if (text == NULL || value == NULL)
     {
-        return 0;
+        return -1;
     }
 
-    cursor = line;
+    errno = 0;
+    parsed = strtol(text, &end, 10);
+    trimmed_end = trim_whitespace(end);
 
-    while (*cursor != '\0' && *command_name != '\0')
+    if (text == end ||
+        errno != 0 ||
+        trimmed_end == NULL ||
+        *trimmed_end != '\0' ||
+        parsed < INT_MIN ||
+        parsed > INT_MAX)
     {
-        if (tolower((unsigned char)*cursor) != tolower((unsigned char)*command_name))
-        {
-            return 0;
-        }
-
-        cursor++;
-        command_name++;
+        return -1;
     }
 
-    if (*command_name != '\0')
-    {
-        return 0;
-    }
-
-    if (*cursor != '\0' && !isspace((unsigned char)*cursor))
-    {
-        return 0;
-    }
-
-    if (remainder != NULL)
-    {
-        *remainder = cursor;
-    }
-
-    return 1;
+    *value = (int)parsed;
+    return 0;
 }
 
 static int has_wav_extension(const char *path)
@@ -497,11 +533,13 @@ typedef enum
     COMPLETE_INVALID,
     COMPLETE_COMMAND,
     COMPLETE_DO_FILE,
-    COMPLETE_DO_PRESET,
     COMPLETE_PLAY_FILE,
-    COMPLETE_SAVE_SUBCOMMAND,
-    COMPLETE_SAVE_PRESET_NAME,
-    COMPLETE_SHOW_SUBCOMMAND
+    COMPLETE_PRESET_SUBCOMMAND,
+    COMPLETE_PRESET_RANDOM_VALUE,
+    COMPLETE_PRESET_LOAD_NAME,
+    COMPLETE_PRESET_SAVE_NAME,
+    COMPLETE_SHOW_SUBCOMMAND,
+    COMPLETE_SHOW_PRESET_NAME
 } CompletionContext;
 
 typedef struct
@@ -988,10 +1026,7 @@ static int parse_completion_state(const char *line, CompletionParseResult *resul
 
     if (token_equals_ignore_case(line, &tokens[0], "do"))
     {
-        result->context =
-            current_token_index == 1 ? COMPLETE_DO_FILE :
-            current_token_index == 2 ? COMPLETE_DO_PRESET :
-            COMPLETE_INVALID;
+        result->context = current_token_index == 1 ? COMPLETE_DO_FILE : COMPLETE_INVALID;
         return 0;
     }
 
@@ -1003,23 +1038,27 @@ static int parse_completion_state(const char *line, CompletionParseResult *resul
 
     if (token_equals_ignore_case(line, &tokens[0], "preset"))
     {
-        result->context = COMPLETE_NONE;
-        return 0;
-    }
-
-    if (token_equals_ignore_case(line, &tokens[0], "save"))
-    {
         if (current_token_index == 1)
         {
-            result->context = COMPLETE_SAVE_SUBCOMMAND;
+            result->context = COMPLETE_PRESET_SUBCOMMAND;
             return 0;
         }
 
-        if (current_token_index == 2 &&
-            token_count >= 2 &&
-            token_equals_ignore_case(line, &tokens[1], "preset"))
+        if (token_count >= 2 && token_equals_ignore_case(line, &tokens[1], "random"))
         {
-            result->context = COMPLETE_SAVE_PRESET_NAME;
+            result->context = current_token_index == 2 ? COMPLETE_PRESET_RANDOM_VALUE : COMPLETE_INVALID;
+            return 0;
+        }
+
+        if (token_count >= 2 && token_equals_ignore_case(line, &tokens[1], "load"))
+        {
+            result->context = current_token_index == 2 ? COMPLETE_PRESET_LOAD_NAME : COMPLETE_INVALID;
+            return 0;
+        }
+
+        if (token_count >= 2 && token_equals_ignore_case(line, &tokens[1], "save"))
+        {
+            result->context = current_token_index == 2 ? COMPLETE_PRESET_SAVE_NAME : COMPLETE_INVALID;
             return 0;
         }
 
@@ -1032,6 +1071,12 @@ static int parse_completion_state(const char *line, CompletionParseResult *resul
         if (current_token_index == 1)
         {
             result->context = COMPLETE_SHOW_SUBCOMMAND;
+            return 0;
+        }
+
+        if (token_count >= 2 && token_equals_ignore_case(line, &tokens[1], "preset"))
+        {
+            result->context = current_token_index == 2 ? COMPLETE_SHOW_PRESET_NAME : COMPLETE_INVALID;
             return 0;
         }
 
@@ -1075,11 +1120,13 @@ static int completion_should_append_space(CompletionContext context, const char 
     {
         case COMPLETE_COMMAND:
         case COMPLETE_DO_FILE:
-        case COMPLETE_DO_PRESET:
         case COMPLETE_PLAY_FILE:
-        case COMPLETE_SAVE_SUBCOMMAND:
-        case COMPLETE_SAVE_PRESET_NAME:
+        case COMPLETE_PRESET_SUBCOMMAND:
+        case COMPLETE_PRESET_RANDOM_VALUE:
+        case COMPLETE_PRESET_LOAD_NAME:
+        case COMPLETE_PRESET_SAVE_NAME:
         case COMPLETE_SHOW_SUBCOMMAND:
+        case COMPLETE_SHOW_PRESET_NAME:
             return 1;
 
         case COMPLETE_NONE:
@@ -1428,7 +1475,6 @@ static int collect_completion_matches(
 {
     char prefix[MAX_COMMAND_LENGTH];
     int match_capacity = 0;
-    static const char *g_preset_subcommand[] = { "preset" };
 
     if (buffer == NULL || parse == NULL || matches == NULL || match_count == NULL)
     {
@@ -1464,16 +1510,36 @@ static int collect_completion_matches(
         case COMPLETE_PLAY_FILE:
             return collect_wav_path_matches(prefix, matches, match_count, &match_capacity);
 
-        case COMPLETE_DO_PRESET:
-        case COMPLETE_SAVE_PRESET_NAME:
+        case COMPLETE_PRESET_LOAD_NAME:
+        case COMPLETE_PRESET_SAVE_NAME:
+        case COMPLETE_SHOW_PRESET_NAME:
             return collect_named_preset_matches(prefix, matches, match_count, &match_capacity);
 
-        case COMPLETE_SAVE_SUBCOMMAND:
+        case COMPLETE_PRESET_SUBCOMMAND:
+            return collect_word_matches(
+                prefix,
+                g_preset_subcommand_catalog,
+                sizeof(g_preset_subcommand_catalog) / sizeof(g_preset_subcommand_catalog[0]),
+                matches,
+                match_count,
+                &match_capacity
+            );
+
+        case COMPLETE_PRESET_RANDOM_VALUE:
+            return collect_word_matches(
+                prefix,
+                g_randomness_catalog,
+                sizeof(g_randomness_catalog) / sizeof(g_randomness_catalog[0]),
+                matches,
+                match_count,
+                &match_capacity
+            );
+
         case COMPLETE_SHOW_SUBCOMMAND:
             return collect_word_matches(
                 prefix,
-                g_preset_subcommand,
-                sizeof(g_preset_subcommand) / sizeof(g_preset_subcommand[0]),
+                g_show_subcommand_catalog,
+                sizeof(g_show_subcommand_catalog) / sizeof(g_show_subcommand_catalog[0]),
                 matches,
                 match_count,
                 &match_capacity
@@ -1662,17 +1728,153 @@ static int prompt_supports_completion(void)
         GetConsoleMode(output_handle, &output_mode) != 0;
 }
 
-static void redraw_prompt_line(const char *prompt, const char *buffer, size_t *previous_length)
+static const char *current_preset_display_name(const Session *session)
 {
+    if (session == NULL || !session->has_current_preset)
+    {
+        return NULL;
+    }
+
+    if (session->current_preset_name[0] != '\0')
+    {
+        return session->current_preset_name;
+    }
+
+    return "preset";
+}
+
+static int format_preset_summary(const Preset *preset, char *buffer, size_t buffer_size)
+{
+    long long total_length = 0;
+
+    if (preset == NULL ||
+        buffer == NULL ||
+        buffer_size == 0 ||
+        preset->nb_seg <= 0 ||
+        preset->segments == NULL)
+    {
+        return -1;
+    }
+
+    for (int index = 0; index < preset->nb_seg; index++)
+    {
+        total_length += preset->segments[index].length;
+    }
+
+    if (snprintf(
+        buffer,
+        buffer_size,
+        "segments=%d length=%lld",
+        preset->nb_seg,
+        total_length) >= (int)buffer_size)
+    {
+        return -1;
+    }
+
+    return 0;
+}
+
+static int build_prompt_text(const Session *session, char *buffer, size_t buffer_size)
+{
+    const char *preset_name;
+    char summary[128];
+
+    if (buffer == NULL || buffer_size == 0)
+    {
+        return -1;
+    }
+
+    preset_name = current_preset_display_name(session);
+
+    if (preset_name == NULL ||
+        format_preset_summary(&session->current_preset, summary, sizeof(summary)) != 0)
+    {
+        return snprintf(buffer, buffer_size, "%s> ", PROGRAM_NAME) >= (int)buffer_size ? -1 : 0;
+    }
+
+    return snprintf(
+        buffer,
+        buffer_size,
+        "%s:[%s]%s> ",
+        preset_name,
+        summary,
+        PROGRAM_NAME) >= (int)buffer_size ? -1 : 0;
+}
+
+static void write_prompt_text_plain(const Session *session)
+{
+    char prompt[MAX_COMMAND_LENGTH];
+
+    if (build_prompt_text(session, prompt, sizeof(prompt)) != 0)
+    {
+        printf("%s> ", PROGRAM_NAME);
+        return;
+    }
+
+    printf("%s", prompt);
+}
+
+static void write_prompt_text_colored(const Session *session)
+{
+    const char *preset_name = current_preset_display_name(session);
+    char summary[128];
+    HANDLE output_handle;
+    CONSOLE_SCREEN_BUFFER_INFO console_info;
+    WORD default_attributes;
+    WORD base_attributes;
+
+    if (preset_name == NULL)
+    {
+        printf("%s> ", PROGRAM_NAME);
+        return;
+    }
+
+    if (format_preset_summary(&session->current_preset, summary, sizeof(summary)) != 0)
+    {
+        write_prompt_text_plain(session);
+        return;
+    }
+
+    output_handle = GetStdHandle(STD_OUTPUT_HANDLE);
+
+    if (output_handle == NULL ||
+        output_handle == INVALID_HANDLE_VALUE ||
+        GetConsoleScreenBufferInfo(output_handle, &console_info) == 0)
+    {
+        write_prompt_text_plain(session);
+        return;
+    }
+
+    default_attributes = console_info.wAttributes;
+    base_attributes = default_attributes & ~(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY);
+
+    SetConsoleTextAttribute(output_handle, base_attributes | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
+    printf("%s:", preset_name);
+    SetConsoleTextAttribute(output_handle, base_attributes | FOREGROUND_RED | FOREGROUND_INTENSITY);
+    printf("[%s]", summary);
+    SetConsoleTextAttribute(output_handle, default_attributes);
+    printf("%s> ", PROGRAM_NAME);
+}
+
+static void redraw_prompt_line(const Session *session, const char *buffer, size_t *previous_length)
+{
+    char prompt[MAX_COMMAND_LENGTH];
     size_t current_length;
 
-    if (prompt == NULL || buffer == NULL || previous_length == NULL)
+    if (buffer == NULL || previous_length == NULL)
     {
         return;
     }
 
+    if (build_prompt_text(session, prompt, sizeof(prompt)) != 0)
+    {
+        snprintf(prompt, sizeof(prompt), "%s> ", PROGRAM_NAME);
+    }
+
     current_length = strlen(prompt) + strlen(buffer);
-    printf("\r%s%s", prompt, buffer);
+    printf("\r");
+    write_prompt_text_colored(session);
+    printf("%s", buffer);
 
     if (*previous_length > current_length)
     {
@@ -1681,7 +1883,9 @@ static void redraw_prompt_line(const char *prompt, const char *buffer, size_t *p
             putchar(' ');
         }
 
-        printf("\r%s%s", prompt, buffer);
+        printf("\r");
+        write_prompt_text_colored(session);
+        printf("%s", buffer);
     }
 
     fflush(stdout);
@@ -1691,19 +1895,19 @@ static void redraw_prompt_line(const char *prompt, const char *buffer, size_t *p
 static int read_interactive_line(
     char *buffer,
     size_t buffer_size,
-    const char *prompt,
+    const Session *session,
     CommandHistory *history)
 {
     CompletionSession completion_session;
 
-    if (buffer == NULL || buffer_size == 0 || prompt == NULL)
+    if (buffer == NULL || buffer_size == 0)
     {
         return -1;
     }
 
     if (!prompt_supports_completion())
     {
-        printf("%s", prompt);
+        write_prompt_text_plain(session);
         fflush(stdout);
 
         if (fgets(buffer, (int)buffer_size, stdin) == NULL)
@@ -1722,7 +1926,7 @@ static int read_interactive_line(
     {
         size_t previous_length = 0;
 
-        redraw_prompt_line(prompt, buffer, &previous_length);
+        redraw_prompt_line(session, buffer, &previous_length);
 
         while (1)
         {
@@ -1740,7 +1944,7 @@ static int read_interactive_line(
                     if (navigate_command_history(history, direction, buffer, buffer, buffer_size))
                     {
                         reset_completion_session(&completion_session);
-                        redraw_prompt_line(prompt, buffer, &previous_length);
+                        redraw_prompt_line(session, buffer, &previous_length);
                     }
                 }
 
@@ -1759,7 +1963,7 @@ static int read_interactive_line(
                 if (apply_completion(buffer, buffer_size, &completion_session))
                 {
                     reset_command_history_navigation(history);
-                    redraw_prompt_line(prompt, buffer, &previous_length);
+                    redraw_prompt_line(session, buffer, &previous_length);
                 }
 
                 continue;
@@ -1772,7 +1976,7 @@ static int read_interactive_line(
                     buffer[length - 1] = '\0';
                     reset_completion_session(&completion_session);
                     reset_command_history_navigation(history);
-                    redraw_prompt_line(prompt, buffer, &previous_length);
+                    redraw_prompt_line(session, buffer, &previous_length);
                 }
 
                 continue;
@@ -1786,14 +1990,14 @@ static int read_interactive_line(
                     buffer[length + 1] = '\0';
                     reset_completion_session(&completion_session);
                     reset_command_history_navigation(history);
-                    redraw_prompt_line(prompt, buffer, &previous_length);
+                    redraw_prompt_line(session, buffer, &previous_length);
                 }
             }
         }
     }
 }
 
-static void print_preset(const Preset *preset)
+static void print_preset(const Preset *preset, const char *preset_name)
 {
     if (preset == NULL || preset->nb_seg <= 0 || preset->segments == NULL)
     {
@@ -1801,7 +2005,14 @@ static void print_preset(const Preset *preset)
         return;
     }
 
-    printf("Preset with %d segment(s):\n", preset->nb_seg);
+    if (preset_name != NULL && *preset_name != '\0')
+    {
+        printf("Preset '%s' with %d segment(s):\n", preset_name, preset->nb_seg);
+    }
+    else
+    {
+        printf("Preset with %d segment(s):\n", preset->nb_seg);
+    }
 
     for (int index = 0; index < preset->nb_seg; index++)
     {
@@ -1819,30 +2030,43 @@ static void print_preset(const Preset *preset)
     }
 }
 
+static void print_current_preset(const Session *session)
+{
+    if (session == NULL || !session->has_current_preset)
+    {
+        printf("No current preset.\n");
+        return;
+    }
+
+    print_preset(&session->current_preset, current_preset_display_name(session));
+}
+
 static void print_usage(void)
 {
     size_t effect_count;
     const EffectDescriptor *catalog = get_effect_catalog(&effect_count);
 
-    printf("wav mini-console commands:\n");
+    printf("%s commands:\n", PROGRAM_NAME);
     printf("  help\n");
     printf("  do <file.wav>\n");
-    printf("  do <file.wav> <preset_name>\n");
     printf("  play <file.wav>\n");
-    printf("  preset <effect,parameter,mix,length;...>\n");
-    printf("  save preset <name>\n");
-    printf("  show preset\n");
+    printf("  preset random [randomness]\n");
+    printf("  preset load <name>\n");
+    printf("  preset save <name>\n");
+    printf("  show preset [name]\n");
     printf("  exit\n");
     printf("  quit\n");
     printf("\n");
-    printf("Run main.exe with no arguments to open the prompt.\n");
-    printf("In prompt mode, press Tab to complete commands, .wav paths, subcommands, and preset names.\n");
-    printf("Direct invocation shortcuts are also supported, for example:\n");
-    printf("  main.exe help\n");
-    printf("  main.exe do <file.wav>\n");
+    printf("Run %s with no arguments to open the prompt.\n", PROGRAM_EXECUTABLE_NAME);
+    printf("In prompt mode, press Tab to complete commands, .wav paths, subcommands, preset names, and randomness values.\n");
+    printf("Direct invocation is also supported, for example:\n");
+    printf("  %s help\n", PROGRAM_EXECUTABLE_NAME);
+    printf("  %s show preset demo\n", PROGRAM_EXECUTABLE_NAME);
     printf("\n");
-    printf("Preset definition example:\n");
-    printf("  preset 1,120,50,44100;2,2048,100,22050\n");
+    printf("Randomness values must be integers from %d to %d. Omitting the value uses %d.\n",
+        MIN_RANDOMNESS,
+        MAX_RANDOMNESS,
+        DEFAULT_RANDOMNESS);
     printf("\n");
     printf("Available effects:\n");
 
@@ -1986,7 +2210,7 @@ static int build_output_path(const char *input_path, const char *label, char *ou
     return -1;
 }
 
-static int update_current_preset(Session *session, const Preset *preset)
+static int update_current_preset(Session *session, const Preset *preset, const char *preset_name)
 {
     if (session == NULL || preset == NULL)
     {
@@ -1999,6 +2223,7 @@ static int update_current_preset(Session *session, const Preset *preset)
     }
 
     session->has_current_preset = 1;
+    set_current_preset_name(session, preset_name);
     return 0;
 }
 
@@ -2232,41 +2457,92 @@ cleanup:
     return result;
 }
 
-static int handle_preset_command(Session *session, const char *definition)
+static void build_random_preset_name(int randomness, char *buffer, size_t buffer_size)
 {
-    Preset parsed;
-
-    if (session == NULL || definition == NULL || is_space_or_empty(definition))
+    if (buffer == NULL || buffer_size == 0)
     {
-        fprintf(stderr, "Missing preset definition.\n");
+        return;
+    }
+
+    snprintf(buffer, buffer_size, "random_%d", randomness);
+}
+
+static int handle_preset_random_command(Session *session, const char *randomness_text)
+{
+    Preset preset;
+    int randomness = DEFAULT_RANDOMNESS;
+    char preset_name[MAX_PRESET_NAME];
+
+    if (session == NULL)
+    {
         return -1;
     }
 
-    init_preset(&parsed);
-
-    if (parse_preset_definition(definition, &parsed) != 0)
+    if (randomness_text != NULL &&
+        (parse_integer_value(randomness_text, &randomness) != 0 ||
+            randomness < MIN_RANDOMNESS ||
+            randomness > MAX_RANDOMNESS))
     {
-        fprintf(
-            stderr,
-            "Invalid preset definition. Expected format: effect,parameter,mix,length;effect,parameter,mix,length\n"
-        );
+        fprintf(stderr, "Usage: preset random [randomness]\n");
+        fprintf(stderr, "Randomness must be an integer from %d to %d.\n", MIN_RANDOMNESS, MAX_RANDOMNESS);
         return -1;
     }
 
-    if (update_current_preset(session, &parsed) != 0)
+    init_preset(&preset);
+
+    if (generate_random_preset(&preset, randomness) != 0)
+    {
+        fprintf(stderr, "Unable to generate a random preset.\n");
+        return -1;
+    }
+
+    build_random_preset_name(randomness, preset_name, sizeof(preset_name));
+
+    if (update_current_preset(session, &preset, preset_name) != 0)
     {
         fprintf(stderr, "Unable to store the current preset in memory.\n");
-        free_preset(&parsed);
+        free_preset(&preset);
         return -1;
     }
 
-    free_preset(&parsed);
-    printf("Current preset updated.\n");
-    print_preset(&session->current_preset);
+    free_preset(&preset);
+    printf("Generated preset '%s'.\n", current_preset_display_name(session));
+    print_current_preset(session);
     return 0;
 }
 
-static int handle_save_preset_command(Session *session, const char *name)
+static int handle_preset_load_command(Session *session, const char *name)
+{
+    Preset preset;
+
+    if (session == NULL || name == NULL || is_space_or_empty(name))
+    {
+        fprintf(stderr, "Missing preset name.\n");
+        return -1;
+    }
+
+    init_preset(&preset);
+
+    if (load_named_preset(PRESET_STORE_PATH, name, &preset) != 0)
+    {
+        fprintf(stderr, "Preset '%s' was not found in %s.\n", name, PRESET_STORE_PATH);
+        return -1;
+    }
+
+    if (update_current_preset(session, &preset, name) != 0)
+    {
+        fprintf(stderr, "Unable to store the current preset in memory.\n");
+        free_preset(&preset);
+        return -1;
+    }
+
+    free_preset(&preset);
+    printf("Loaded preset '%s'.\n", name);
+    print_current_preset(session);
+    return 0;
+}
+
+static int handle_preset_save_command(Session *session, const char *name)
 {
     if (session == NULL || name == NULL || is_space_or_empty(name))
     {
@@ -2276,7 +2552,7 @@ static int handle_save_preset_command(Session *session, const char *name)
 
     if (!session->has_current_preset)
     {
-        fprintf(stderr, "No current preset is loaded. Use 'preset ...' or 'do <file.wav>' first.\n");
+        fprintf(stderr, "No current preset is loaded. Use 'preset random [randomness]' or 'preset load <name>' first.\n");
         return -1;
     }
 
@@ -2286,19 +2562,44 @@ static int handle_save_preset_command(Session *session, const char *name)
         return -1;
     }
 
-    printf("Saved preset '%s' to %s\n", name, PRESET_STORE_PATH);
+    set_current_preset_name(session, name);
+    printf("Saved current preset as '%s' to %s\n", name, PRESET_STORE_PATH);
     return 0;
 }
 
-static int handle_do_command(Session *session, const char *input_path, const char *preset_name)
+static int handle_show_named_preset_command(const char *name)
 {
     Preset preset;
-    short *samples = NULL;
-    SF_INFO info;
-    int result = -1;
 
+    if (name == NULL || is_space_or_empty(name))
+    {
+        fprintf(stderr, "Missing preset name.\n");
+        return -1;
+    }
+
+    init_preset(&preset);
+
+    if (load_named_preset(PRESET_STORE_PATH, name, &preset) != 0)
+    {
+        fprintf(stderr, "Preset '%s' was not found in %s.\n", name, PRESET_STORE_PATH);
+        return -1;
+    }
+
+    print_preset(&preset, name);
+    free_preset(&preset);
+    return 0;
+}
+
+static int handle_do_command(Session *session, const char *input_path)
+{
     if (session == NULL || input_path == NULL)
     {
+        return -1;
+    }
+
+    if (!session->has_current_preset)
+    {
+        fprintf(stderr, "No current preset is loaded. Use 'preset random [randomness]' or 'preset load <name>' first.\n");
         return -1;
     }
 
@@ -2308,55 +2609,10 @@ static int handle_do_command(Session *session, const char *input_path, const cha
         return -1;
     }
 
-    init_preset(&preset);
-
-    if (preset_name == NULL)
-    {
-        if (load_audio_file(input_path, &samples, &info) != 0)
-        {
-            return -1;
-        }
-
-        if (generate_random_preset(&preset, info.frames, info.samplerate, info.channels) != 0)
-        {
-            fprintf(stderr, "Unable to generate a random preset.\n");
-            goto cleanup;
-        }
-
-        free(samples);
-        samples = NULL;
-        printf("Generated random preset for %s\n", input_path);
-    }
-    else
-    {
-        if (load_named_preset(PRESET_STORE_PATH, preset_name, &preset) != 0)
-        {
-            fprintf(stderr, "Preset '%s' was not found in %s.\n", preset_name, PRESET_STORE_PATH);
-            goto cleanup;
-        }
-
-        printf("Loaded preset '%s'.\n", preset_name);
-    }
-
-    print_preset(&preset);
-
-    if (update_current_preset(session, &preset) != 0)
-    {
-        fprintf(stderr, "Unable to store the current preset in memory.\n");
-        goto cleanup;
-    }
-
-    if (process_audio_file(input_path, &preset, preset_name != NULL ? preset_name : "random") != 0)
-    {
-        goto cleanup;
-    }
-
-    result = 0;
-
-cleanup:
-    free(samples);
-    free_preset(&preset);
-    return result;
+    return process_audio_file(
+        input_path,
+        &session->current_preset,
+        current_preset_display_name(session));
 }
 
 static int handle_play_command(const char *input_path)
@@ -2381,7 +2637,7 @@ static int handle_play_command(const char *input_path)
         player_path,
         sizeof(player_path)) != 0)
     {
-        fprintf(stderr, "Unable to resolve the bundled player path relative to main.exe.\n");
+        fprintf(stderr, "Unable to resolve the bundled player path relative to %s.\n", PROGRAM_EXECUTABLE_NAME);
         return -1;
     }
 
@@ -2415,25 +2671,36 @@ static int execute_tokens(Session *session, int argc, char **argv)
         return 0;
     }
 
-    if (equals_ignore_case(argv[0], "show") && argc == 2 && equals_ignore_case(argv[1], "preset"))
+    if (equals_ignore_case(argv[0], "exit") || equals_ignore_case(argv[0], "quit"))
     {
-        print_preset(session != NULL && session->has_current_preset ? &session->current_preset : NULL);
         return 0;
+    }
+
+    if (equals_ignore_case(argv[0], "show"))
+    {
+        if (argc == 2 && equals_ignore_case(argv[1], "preset"))
+        {
+            print_current_preset(session);
+            return 0;
+        }
+
+        if (argc == 3 && equals_ignore_case(argv[1], "preset"))
+        {
+            return handle_show_named_preset_command(argv[2]);
+        }
+
+        fprintf(stderr, "Usage: show preset [name]\n");
+        return -1;
     }
 
     if (equals_ignore_case(argv[0], "do"))
     {
         if (argc == 2)
         {
-            return handle_do_command(session, argv[1], NULL);
+            return handle_do_command(session, argv[1]);
         }
 
-        if (argc == 3)
-        {
-            return handle_do_command(session, argv[1], argv[2]);
-        }
-
-        fprintf(stderr, "Usage: do <file.wav> [preset_name]\n");
+        fprintf(stderr, "Usage: do <file.wav>\n");
         return -1;
     }
 
@@ -2450,23 +2717,29 @@ static int execute_tokens(Session *session, int argc, char **argv)
 
     if (equals_ignore_case(argv[0], "preset"))
     {
-        if (argc != 2)
+        if (argc == 2 && equals_ignore_case(argv[1], "random"))
         {
-            fprintf(stderr, "Usage: preset <effect,parameter,mix,length;...>\n");
-            return -1;
+            return handle_preset_random_command(session, NULL);
         }
 
-        return handle_preset_command(session, argv[1]);
-    }
-
-    if (equals_ignore_case(argv[0], "save"))
-    {
-        if (argc == 3 && equals_ignore_case(argv[1], "preset"))
+        if (argc == 3 && equals_ignore_case(argv[1], "random"))
         {
-            return handle_save_preset_command(session, argv[2]);
+            return handle_preset_random_command(session, argv[2]);
         }
 
-        fprintf(stderr, "Usage: save preset <name>\n");
+        if (argc == 3 && equals_ignore_case(argv[1], "load"))
+        {
+            return handle_preset_load_command(session, argv[2]);
+        }
+
+        if (argc == 3 && equals_ignore_case(argv[1], "save"))
+        {
+            return handle_preset_save_command(session, argv[2]);
+        }
+
+        fprintf(stderr, "Usage: preset random [randomness]\n");
+        fprintf(stderr, "       preset load <name>\n");
+        fprintf(stderr, "       preset save <name>\n");
         return -1;
     }
 
@@ -2483,17 +2756,16 @@ static int run_interactive_console(Session *session)
 
     initialize_command_history(&history);
 
-    printf("wav mini-console\n");
+    printf("%s\n", PROGRAM_NAME);
     printf("Type 'help' for commands and 'exit' or 'quit' to leave.\n");
 
     while (1)
     {
-        const char *preset_definition;
         char *tokens[MAX_COMPLETION_TOKENS];
         int token_count;
         char *command;
 
-        if (read_interactive_line(line, sizeof(line), "wav> ", &history) <= 0)
+        if (read_interactive_line(line, sizeof(line), session, &history) <= 0)
         {
             break;
         }
@@ -2515,12 +2787,6 @@ static int run_interactive_console(Session *session)
             break;
         }
 
-        if (matches_command_name_ignore_case(command, "preset", &preset_definition))
-        {
-            execute_tokens(session, 2, (char *[]) { "preset", (char *)preset_definition });
-            continue;
-        }
-
         token_count = split_command_line(command, tokens, MAX_COMPLETION_TOKENS);
 
         if (token_count == 0)
@@ -2537,54 +2803,9 @@ static int run_interactive_console(Session *session)
 
 static int run_direct_command_shortcut(Session *session, int argc, char **argv)
 {
-    char *command_argv[2];
-    size_t total_length = 0;
-    char *definition;
-    int result;
-
     if (argc <= 0 || argv == NULL)
     {
         return -1;
-    }
-
-    if (equals_ignore_case(argv[0], "preset"))
-    {
-        if (argc < 2)
-        {
-            fprintf(stderr, "Usage: preset <effect,parameter,mix,length;...>\n");
-            return -1;
-        }
-
-        for (int index = 1; index < argc; index++)
-        {
-            total_length += strlen(argv[index]) + 1;
-        }
-
-        definition = malloc(total_length + 1);
-
-        if (definition == NULL)
-        {
-            fprintf(stderr, "Unable to allocate memory for preset definition.\n");
-            return -1;
-        }
-
-        definition[0] = '\0';
-
-        for (int index = 1; index < argc; index++)
-        {
-            strcat(definition, argv[index]);
-
-            if (index + 1 < argc)
-            {
-                strcat(definition, " ");
-            }
-        }
-
-        command_argv[0] = "preset";
-        command_argv[1] = definition;
-        result = execute_tokens(session, 2, command_argv);
-        free(definition);
-        return result;
     }
 
     return execute_tokens(session, argc, argv);

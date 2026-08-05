@@ -1,19 +1,10 @@
 # sd_edit
 
-`sd_edit` is a small C mini-console for `.wav` editing. It uses libsndfile for audio I/O and models processing as a preset made of ordered effect segments.
+`sd_edit` is a small C console tool for `.wav` editing. It uses libsndfile for audio I/O and models processing as an ordered preset made of effect segments.
 
-This repository also serves as a small vehicle for testing agentic IDE workflows.
+This README is the product definition for the repository and documents the code as it behaves now.
 
-The README serves two purposes in this repository:
-
-- it keeps the original product objective visible
-- it documents the current implementation exactly as the code behaves today
-
-That split matters here because the code already exposes more commands, more effect IDs, and more runtime details than the original prototype note described.
-
-## Overview
-
-The core preset model is:
+## Core preset model
 
 ```c
 typedef struct
@@ -31,36 +22,41 @@ typedef struct
 } Preset;
 ```
 
-A preset is an ordered array of segments. Each segment selects one effect, one effect parameter, one wet/dry mix value, and one segment length.
+A preset is an ordered array of segments. Each segment selects:
 
-The tool is `.wav`-only. The current implementation reads an input file into memory, applies each preset segment in order to consecutive regions of the sample buffer, and writes a new `.wav` file.
+- one effect ID
+- one effect parameter
+- one wet/dry mix percentage
+- one segment length
 
-## Product objective vs current implementation
+The tool is `.wav`-only.
 
-The original product draft defined this target command set:
+## Command model
 
-- `do <file.wav>`
-- `do <file.wav> <preset_name>`
-- `play <file.wav>`
-- `preset <preset_definition>`
-- `save preset <name>`
+The console now uses a session-first workflow.
 
-It also only explicitly defined effect `1 = pitch`, while leaving later effect IDs open.
+Supported commands:
 
-The current implementation keeps that direction, but now exposes it primarily through an interactive prompt opened by running the program with no command arguments. The same command words are still accepted as direct one-shot shortcuts.
-
-Current implementation details that extend the original draft:
-
-- interactive prompt-first workflow
 - `help`
-- `show preset`
-- `exit` and `quit`
-- a centralized effect catalog with IDs `1` through `6`
-- session-local preset state used by `preset`, `do`, `show preset`, and `save preset`
+- `do <file.wav>`
+- `play <file.wav>`
+- `preset random [randomness]`
+- `preset load <name>`
+- `preset save <name>`
+- `show preset [name]`
+- `exit`
+- `quit`
 
-The sections below document the current code behavior without changing the product objective.
+The intended flow is:
 
-## Compilation
+1. start with no preset loaded
+2. load or generate the active preset explicitly
+3. apply the active preset with `do <file.wav>`
+4. optionally save it for reuse
+
+`do` no longer generates or loads presets on demand.
+
+## Build and run
 
 ### Prerequisites
 
@@ -68,235 +64,250 @@ The sections below document the current code behavior without changing the produ
 - GNU `make`
 - a Windows-compatible shell environment, because the makefile uses `cmd.exe`, `set`, and `del`
 
-The repository already bundles libsndfile in `libsndfile-1.2.2-win64/`. The build expects that directory to stay in place.
+The repository bundles libsndfile in `libsndfile-1.2.2-win64/`.
 
-### Build commands
-
-Build the executable:
+### Build
 
 ```sh
 make
 ```
 
-Run the program through the makefile wrapper:
+This produces:
 
-```sh
-make run
+```text
+sd_edit.exe
 ```
 
-This is the primary workflow. It launches `main.exe` with no command arguments, which opens the interactive prompt.
-
-If you want to run a direct shortcut through the wrapper instead, pass `ARGS`:
-
-```sh
-make run ARGS="do audio\\test.wav"
-```
-
-Clean the executable and object files:
+Clean build outputs:
 
 ```sh
 make clean
 ```
 
-### Runtime PATH behavior
-
-At startup, `main.exe` now tries to load `sndfile.dll` in this order:
-
-- first from the bundled repository path relative to the executable:
-  `libsndfile-1.2.2-win64\\bin\\sndfile.dll`
-- then from the current process `PATH`
-
-If neither location works, the program reaches `main()` and prints a clear CLI error that mentions `sndfile.dll`, the expected bundled path, and the suggested fix.
-
-The `run` target still prepends the bundled `libsndfile-1.2.2-win64\\bin` directory to `PATH` before launching `main.exe`, so it remains a convenient wrapper, but it is no longer the only thing preventing an opaque Windows loader failure before program startup.
-
-### Direct execution
-
-After `make`, you can start the interactive console directly:
-
-```sh
-main.exe
-```
-
-Shortcut mode is still available for one-shot commands:
-
-```sh
-main.exe help
-main.exe do audio\\test.wav
-main.exe play audio\\test.wav
-```
-
-Direct execution no longer depends on pre-configuring `PATH` just to get past process startup. When the bundled runtime is present in the repository layout, `main.exe` loads it automatically. If the bundled DLL is missing and `PATH` also does not provide `sndfile.dll`, the program prints a controlled error instead of failing before `main()`.
-
-## Usage
-
-### Primary workflow: interactive prompt
-
-Start the program and work from the prompt:
+Run through the makefile wrapper:
 
 ```sh
 make run
 ```
 
-or, after building:
+The wrapper prepends the bundled `libsndfile-1.2.2-win64\bin` directory to `PATH` and launches `sd_edit.exe`.
+
+### Direct execution
+
+After building:
 
 ```sh
-main.exe
+sd_edit.exe
 ```
 
-You will get a prompt like:
+Useful one-shot direct commands:
+
+```sh
+sd_edit.exe help
+sd_edit.exe play audio\test.wav
+sd_edit.exe show preset demo
+```
+
+`do <file.wav>` depends on the current in-process preset, so it is normally used from the interactive prompt rather than as a one-shot direct command.
+
+### Runtime DLL behavior
+
+At startup, `sd_edit.exe` tries to load `sndfile.dll` in this order:
+
+1. from the bundled repository path relative to the executable:
+   `libsndfile-1.2.2-win64\bin\sndfile.dll`
+2. from the current process `PATH`
+
+If both fail, the program prints a controlled error instead of failing before `main()`.
+
+## Interactive console
+
+Start the prompt with:
+
+```sh
+make run
+```
+
+or:
+
+```sh
+sd_edit.exe
+```
+
+The startup banner is:
 
 ```text
-wav mini-console
+sd_edit
 Type 'help' for commands and 'exit' or 'quit' to leave.
-wav>
+sd_edit>
 ```
 
-Run `help` at the prompt to print the full command list plus the currently registered effect catalog.
+### Prompt behavior
 
-The prompt also supports `Tab` completion. It completes:
+When no preset is active, the prompt is just:
 
-- command words in the first token
+```text
+sd_edit>
+```
+
+When a preset is active, the prompt shows the preset name and prompt stats before `sd_edit>`:
+
+```text
+random_5:[segments=6 length=247143]sd_edit>
+demo:[segments=6 length=247143]sd_edit>
+```
+
+On a Windows console, the preset name is shown in green and the stats are shown in red. When colored redraw is unavailable, the same text is printed without color.
+
+### Tab completion
+
+The prompt supports `Tab` completion for:
+
+- top-level command names
 - `.wav` paths after `do ` and `play `
-- the `preset` subcommand after `save ` and `show `
-- saved preset names after `do <file.wav> ` and `save preset `
+- `random`, `load`, and `save` after `preset `
+- randomness values `0` through `10` after `preset random `
+- saved preset names after `preset load `, `preset save `, and `show preset `
 
-When there are multiple matches, the first `Tab` extends to the longest common prefix and repeated `Tab` presses cycle concrete matches in place. The `preset <definition>` grammar stays free-form, so `Tab` does not try to complete numeric segment definitions.
+When there are multiple matches, the first `Tab` extends to the longest common prefix and repeated `Tab` presses cycle through matches.
 
-Supported prompt commands:
+If a path contains spaces, start the token with a quote before using `Tab`.
 
-- `help`
-  - prints the interactive command reference and current effect catalog
+## Command behavior
 
-- `do <file.wav>`
-  - validates that the input ends in `.wav`
-  - loads the file once to inspect audio metadata
-  - generates a random preset
-  - stores that preset as the current in-memory preset for the running process
-  - reloads the file, applies the preset segments in order, and writes `<input>_random.wav`
+### `help`
 
-- `do <file.wav> <preset_name>`
-  - validates that the input ends in `.wav`
-  - loads the latest matching named preset from `presets.txt`
-  - stores that preset as the current in-memory preset for the running process
-  - applies it to the input file and writes `<input>_<preset_name>.wav` after suffix sanitization
+Prints the command list and the current effect catalog.
 
-- `play <file.wav>`
-  - validates that the input ends in `.wav`
-  - resolves the full path to the bundled `sndfile-play.exe` relative to `main.exe`
-  - resolves the full path to the requested audio file
-  - waits for the external player process to finish
+### `preset random [randomness]`
 
-- `preset <effect,parameter,mix,length;...>`
-  - parses an explicit preset definition
-  - replaces the current in-memory preset for the running process
-  - preserves the full definition text after the command name, including internal spaces
-  - prints the parsed preset back to the console
+Creates the current in-memory preset without loading any audio file first.
 
-- `save preset <name>`
-  - appends the current in-memory preset to `presets.txt`
-  - fails if no preset has been created or loaded in the current process
+Rules:
 
-- `show preset`
-  - prints the current in-memory preset
-  - prints `No current preset.` when no preset has been loaded in the current process
+- omitted `randomness` defaults to `5`
+- `randomness` must be an integer in `0..10`
+- the number maps directly to the segment count as `randomness + 1`
+- `0` creates `1` segment
+- `10` creates `11` segments
+- invalid values do not replace the current preset
 
-- `exit`
-  - leaves the console
-
-- `quit`
-  - leaves the console
-
-Example interactive flow:
+The generated preset receives a synthetic session name:
 
 ```text
-wav> help
-wav> show preset
-wav> preset 1,120,50,44100
-wav> PRESET 1,120,50,44100; 5,8000,40,44100
-wav> save preset demo
-wav> do audio\test.wav demo
-wav> do audio\test.wav
-wav> exit
+random_<randomness>
 ```
 
-The prompt is the intended way to chain commands that depend on session state. In particular, `show preset` and `save preset <name>` only operate on the current in-memory preset held by the running process.
+Examples:
 
-If a path contains spaces, start the token with a quote before using `Tab`, for example `do "path with spaces\\te`.
+- `preset random`
+- `preset random 0`
+- `preset random 10`
 
-### Direct invocation shortcuts
+### `preset load <name>`
 
-The same shared command dispatcher also accepts direct argv shortcuts for one-shot use:
+Loads the latest valid preset named `<name>` from `presets.txt`, stores it as the current session preset, prints it, and updates the prompt prefix to that preset name.
 
-```sh
-main.exe help
-main.exe do audio\\test.wav
-main.exe do audio\\test.wav demo
-main.exe play audio\\test.wav
-```
+### `preset save <name>`
 
-Direct `preset` is also supported. If the definition contains spaces, quote it so the shell passes the full text as command arguments:
+Appends the current session preset to `presets.txt`.
 
-```sh
-main.exe preset "1,120,50,44100; 5,8000,40,44100"
-```
+Rules:
 
-### Session state limitation
+- fails if there is no current preset in the running process
+- preserves the existing append-only storage format
+- after a successful save, the active preset display name becomes `<name>`
 
-Preset state is process-local. Separate command-line invocations do not share `current_preset`.
+### `show preset`
 
-That means this does not work as a two-step workflow across separate runs:
+Prints the current session preset.
+
+If no preset is active, it prints:
 
 ```text
-main.exe preset 1,120,50,44100
-main.exe save preset p1
+No current preset.
 ```
 
-The second command starts a fresh process, so there is no current preset to save. Use the interactive prompt when you want to create or load a preset and then save it in the same session.
+### `show preset <name>`
 
-## Preset format
+Loads and prints the latest valid stored preset named `<name>` from `presets.txt` without replacing the current session preset.
 
-### Segment fields
+This is read-only named lookup.
 
-Each segment contains:
+### `do <file.wav>`
 
-- `name`: effect ID
-- `prmtr`: effect-specific parameter
-- `mix`: wet/dry percentage from `0` to `100`
-- `length`: segment duration used by the processing loop
+Applies the current session preset to the input file and writes a processed `.wav` output.
 
-The command-line preset grammar is:
+Rules:
+
+- fails if there is no current preset
+- only accepts `.wav` input
+- uses the current preset display name as the output suffix
+- applies segments in order to consecutive parts of the sample buffer
+- truncates a segment if it would run past end-of-file
+- leaves any uncovered tail audio unchanged
+
+Examples:
+
+- after `preset random 5`, `do audio\test.wav` writes `audio\test_random_5.wav`
+- after `preset load demo`, `do audio\test.wav` writes `audio\test_demo.wav`
+
+### `play <file.wav>`
+
+Launches the bundled `sndfile-play.exe` relative to `sd_edit.exe` and waits for it to exit.
+
+### `exit` / `quit`
+
+Leave the interactive console.
+
+## Example interactive session
 
 ```text
-effect,parameter,mix,length;effect,parameter,mix,length;...
+sd_edit> show preset
+No current preset.
+sd_edit> preset random
+Generated preset 'random_5'.
+Preset 'random_5' with 6 segment(s):
+  1. effect=...
+random_5:[segments=6 length=...]sd_edit> do audio\test.wav
+Saved processed audio to audio\test_random_5.wav
+random_5:[segments=6 length=...]sd_edit> preset save demo
+Saved current preset as 'demo' to presets.txt
+demo:[segments=6 length=...]sd_edit> show preset demo
+Preset 'demo' with 6 segment(s):
+  1. effect=...
+demo:[segments=6 length=...]sd_edit> exit
 ```
 
-Examples that match the parser:
+## Session model
+
+The program keeps exactly one current preset in memory per process.
+
+That affects command behavior directly:
+
+- `preset random [randomness]` replaces the current session preset
+- `preset load <name>` replaces the current session preset
+- `preset save <name>` persists the current session preset
+- `show preset` reads the current session preset
+- `show preset <name>` does not replace the current session preset
+- `do <file.wav>` uses the current session preset as-is
+
+Preset state is not shared across separate invocations.
+
+That means this does not work:
 
 ```text
-1,120,50,44100
-1,120,50,44100;2,2048,100,22050
-4,0,100,22050;5,8000,40,44100
+sd_edit.exe preset random 5
+sd_edit.exe do audio\test.wav
 ```
 
-Parser rules enforced by the code:
+The second command starts a fresh process with no current preset loaded. Use the interactive prompt when you want to chain `preset random` or `preset load` into `do`.
 
-- segments are separated with `;`
-- each segment must contain exactly four integers
-- surrounding whitespace is tolerated
-- effect IDs must exist in the effect catalog
-- `mix` must be between `0` and `100`
-- `length` must be greater than `0`
+## Preset format and persistence
 
-### Length interpretation
+### Stored format
 
-The original draft described `length` as a sample count. The current processing loop applies each segment as `segment.length * channels`, so in the implementation today `length` behaves as a frame count.
-
-For a mono file, frames and samples are the same. For a stereo file, `44100` means `44100` frames, which becomes `88200` raw samples during processing.
-
-## Preset persistence
-
-Named presets are stored in `presets.txt` in this format:
+Named presets are stored in `presets.txt` as:
 
 ```text
 name|segment_count|definition
@@ -305,64 +316,71 @@ name|segment_count|definition
 Example:
 
 ```text
-p1|1|1,120,50,44100
+demo|2|1,120,50,44100;5,8000,40,22050
 ```
 
-Current persistence behavior:
+Persistence rules:
 
-- `save preset <name>` opens `presets.txt` in append mode
-- every save writes one new line
+- saves append one new line
 - there is no in-place update or deduplication
-- preset names cannot contain `|`, carriage returns, or newlines
-- `Tab` completion reads the same store, but free-form names are still allowed if you keep typing manually
+- names cannot contain `|`, carriage returns, or newlines
+- invalid lines are skipped while loading and while collecting completion suggestions
+- if the same name appears multiple times, the latest valid matching line wins when loading
 
-When loading a named preset:
+### Definition syntax
 
-- the loader scans the whole file from top to bottom
-- invalid lines are skipped
-- the parsed segment count must match the stored `segment_count`
-- if the same preset name appears multiple times, the latest valid matching entry wins
+Stored preset definitions still use:
 
-Prompt completion follows the same validation rules. Invalid lines do not contribute suggestions, and duplicate preset names appear at most once in the suggestion set using the latest valid stored definition.
+```text
+effect,parameter,mix,length;effect,parameter,mix,length;...
+```
 
-In other words, duplicate preset names resolve to the last valid saved line for that name.
+Parser rules:
 
-## Output behavior
+- segments are separated with `;`
+- each segment must contain exactly four integers
+- surrounding whitespace is tolerated
+- effect IDs must exist in the effect catalog
+- `mix` must be in `0..100`
+- `length` must be greater than `0`
 
-### Input and processing rules
+### Length interpretation
 
-- only `.wav` inputs are accepted
-- the program loads the entire file into memory before processing
-- preset segments are applied in order to consecutive regions of the sample buffer
-- each segment uses its own `name`, `prmtr`, `mix`, and `length`
-- if a segment would run past the end of the file, it is truncated to the remaining audio
-- if the preset covers less than the full file, the remaining audio is left unchanged
+`length` is consumed by the processing loop as a frame count. During processing, each segment spans:
 
-### Output naming
+```text
+segment.length * channels
+```
 
-The output name is built from the input path plus a sanitized suffix:
+raw samples in the current file.
+
+Randomly generated presets use positive default frame lengths in the range `11025..88200`. This keeps presets serializable before any audio file has been selected. If a generated segment is longer than the remaining input, processing truncates it at EOF.
+
+## Output naming
+
+Outputs are written as:
 
 ```text
 <input_without_.wav>_<suffix>.wav
 ```
 
-Suffix behavior:
+Suffix rules:
 
 - letters and digits are lowercased and kept
 - `-` and `_` are kept
 - all other characters become `_`
 - an empty suffix falls back to `processed`
-- if that output path already exists, the program retries with `1`, `2`, and so on appended to the suffix until it finds a free filename
+- if the target path already exists, the program retries with `1`, `2`, and so on appended
 
 Examples:
 
-- `do audio\\test.wav` writes `audio\\test_random.wav`
-- `do audio\\test.wav p1` writes `audio\\test_p1.wav`
-- if `audio\\test_random.wav` already exists, the next random run writes `audio\\test_random1.wav`
+- active preset `random_5` -> `audio\test_random_5.wav`
+- active preset `demo` -> `audio\test_demo.wav`
+- if `audio\test_demo.wav` already exists, the next save becomes `audio\test_demo1.wav`
 
 ## Supported effects
 
-The current effect catalog is centralized in `include/effects.h` and `src/effects.c`:
+The effect catalog is centralized in `include/effects.h` and `src/effects.c`:
 
 - `1 = pitch`
 - `2 = shuffle`
@@ -371,16 +389,14 @@ The current effect catalog is centralized in `include/effects.h` and `src/effect
 - `5 = echo`
 - `6 = distortion`
 
-Effect parameter usage in the current implementation:
+Current parameter behavior:
 
 - `1 pitch`: `prmtr` is pitch percent, `mix` is used
-- `2 shuffle`: `prmtr` is chunk size, `mix` is ignored by the implementation
+- `2 shuffle`: `prmtr` is chunk size, `mix` is ignored
 - `3 gain`: `prmtr` is gain percent, `mix` is used
-- `4 reverse`: `prmtr` and `mix` are not used by the implementation
+- `4 reverse`: `prmtr` and `mix` are ignored
 - `5 echo`: `prmtr` is delay in samples, `mix` is used
 - `6 distortion`: `prmtr` is drive percent, `mix` is used
-
-This is broader than the original roadmap note, which only explicitly reserved `1 = pitch` and left later IDs open.
 
 ## Architecture
 
@@ -388,92 +404,84 @@ This is broader than the original roadmap note, which only explicitly reserved `
 
 - `src/main.c`
   - process-local session state
-  - prompt parsing, direct shortcut parsing, and interactive console
-  - shared usage/help output
+  - interactive console and direct command dispatch
+  - prompt rendering and completion
   - audio file loading and saving
-  - output-path generation
   - preset application over the audio buffer
-  - external playback launch
+  - playback launch
 
 - `src/preset.c`
   - `Preset` memory management
-  - preset-definition parsing
-  - named preset serialization to `presets.txt`
-  - named preset loading from `presets.txt`
+  - preset parsing
+  - named preset save/load/list operations
   - random preset generation
 
 - `src/effects.c`
-  - centralized effect catalog
-  - effect-name lookup and support checks
-  - effect dispatch by ID
+  - effect catalog
+  - effect dispatch
   - effect implementations
 
 - `include/preset.h`
-  - shared `Segment` and `Preset` data model
-  - preset API declarations
+  - shared preset structs and preset API
 
 - `include/effects.h`
-  - effect ID enum
-  - effect catalog descriptor type
-  - effect API declarations
-
-### Session model
-
-The program keeps exactly one `current_preset` in memory per process.
-
-That matters most in the interactive console:
-
-- `preset ...` replaces the current session preset
-- `do <file.wav>` and `do <file.wav> <preset_name>` both update the current session preset
-- `show preset` reads the current session preset
-- `save preset <name>` persists the current session preset
-
-A new direct invocation such as `main.exe save preset demo` starts with an empty session, so it cannot see preset state created by an earlier process.
+  - effect IDs and effect API
 
 ### Execution flow
 
-Random `do` path:
+`preset random [randomness]`:
+
+1. validate the optional randomness value
+2. generate `randomness + 1` segments from the centralized effect catalog
+3. assign random parameters, mixes, and positive default lengths
+4. store the preset in the current session under `random_<randomness>`
+5. print the preset and update the prompt
+
+`preset load <name>`:
+
+1. scan `presets.txt`
+2. keep the latest valid matching entry
+3. store it as the current session preset
+4. print it and update the prompt
+
+`do <file.wav>`:
+
+1. validate that a current preset exists
+2. validate the `.wav` path
+3. load the audio into memory
+4. apply preset segments in order
+5. save the result with a suffix derived from the current preset name
+
+`show preset <name>`:
+
+1. scan `presets.txt`
+2. keep the latest valid matching entry
+3. print it
+4. leave the current session unchanged
+
+`play <file.wav>`:
 
 1. validate the `.wav` path
-2. load the audio once to collect frame count, sample rate, and channel count
-3. generate a random preset with `1` to `4` segments using the centralized effect catalog
-4. store that preset as the current session preset
-5. reload the audio for processing
-6. apply segments in order to consecutive parts of the buffer
-7. save the result with the `_random.wav` suffix
-
-Named-preset `do` path:
-
-1. validate the `.wav` path
-2. load the latest matching named preset from `presets.txt`
-3. store that preset as the current session preset
-4. load the audio
-5. apply segments in order
-6. save the result with a suffix derived from the preset name
-
-`play` path:
-
-1. validate the `.wav` path
-2. resolve the absolute path to the bundled `libsndfile-1.2.2-win64\bin\sndfile-play.exe` relative to `main.exe`
+2. resolve the bundled `libsndfile-1.2.2-win64\bin\sndfile-play.exe` relative to `sd_edit.exe`
 3. resolve the absolute path to the input file
-4. spawn the bundled player and wait for it to exit
+4. spawn the player and wait for it to exit
 
 ## Repository layout
 
-- `src/main.c`: entry point, CLI, interactive console, audio I/O, playback launch
+- `src/main.c`: CLI, prompt, audio I/O, preset application, playback
 - `src/preset.c`: preset parsing, storage, loading, random generation
 - `src/effects.c`: effect catalog and effect implementations
 - `include/preset.h`: preset structs and preset API
 - `include/effects.h`: effect IDs and effect API
-- `audio/`: sample input and output files used during local testing
+- `audio/`: sample input and output files used for local testing
 - `presets.txt`: append-only named preset store
-- `libsndfile-1.2.2-win64/`: bundled libsndfile headers, libraries, DLLs, and `sndfile-play.exe`
+- `libsndfile-1.2.2-win64/`: bundled libsndfile and `sndfile-play.exe`
 - `makefile`: build, run, and clean targets
 
 ## Current limitations
 
 - `.wav` is the only supported format
-- preset state is not shared across separate program invocations
+- preset state is process-local
 - named preset storage is plain text and append-only
-- output processing is in-memory, not streaming
-- `play` still depends on the bundled Windows player and a working libsndfile runtime, even though both are now resolved more robustly at startup
+- processing is in-memory, not streaming
+- playback depends on the bundled Windows player and a working libsndfile runtime

@@ -8,10 +8,14 @@
 
 #include "effects.h"
 
-#define MIN_RANDOM_SEGMENTS 1
-#define MAX_RANDOM_SEGMENTS 4
+#define MIN_RANDOMNESS 0
+#define MAX_RANDOMNESS 10
 #define MIN_MIX_PERCENT 25
 #define MAX_MIX_PERCENT 100
+#define DEFAULT_RANDOM_SAMPLE_RATE 44100
+#define DEFAULT_RANDOM_CHANNELS 1
+#define MIN_RANDOM_SEGMENT_LENGTH (DEFAULT_RANDOM_SAMPLE_RATE / 4)
+#define MAX_RANDOM_SEGMENT_LENGTH (DEFAULT_RANDOM_SAMPLE_RATE * 2)
 #define PRESET_NAME_SEPARATOR '|'
 #define PRESET_STORE_LINE_LENGTH 4096
 
@@ -134,18 +138,17 @@ static int random_between(int minimum, int maximum)
     return minimum + (rand() % (maximum - minimum + 1));
 }
 
-static int random_effect_parameter(int effect_id, int sample_rate, int channels)
+static int random_effect_parameter(int effect_id)
 {
-    int effective_channels = channels > 0 ? channels : 1;
-    int effective_rate = sample_rate > 0 ? sample_rate : 44100;
-
     switch (effect_id)
     {
         case EFFECT_PITCH_SHIFT:
             return random_between(70, 140);
 
         case EFFECT_SHUFFLE_CHUNKS:
-            return random_between(effective_rate / 100, effective_rate / 8) * effective_channels;
+            return random_between(
+                DEFAULT_RANDOM_SAMPLE_RATE / 100,
+                DEFAULT_RANDOM_SAMPLE_RATE / 8) * DEFAULT_RANDOM_CHANNELS;
 
         case EFFECT_GAIN:
             return random_between(60, 180);
@@ -154,7 +157,9 @@ static int random_effect_parameter(int effect_id, int sample_rate, int channels)
             return 0;
 
         case EFFECT_ECHO:
-            return random_between(effective_rate / 40, effective_rate / 3) * effective_channels;
+            return random_between(
+                DEFAULT_RANDOM_SAMPLE_RATE / 40,
+                DEFAULT_RANDOM_SAMPLE_RATE / 3) * DEFAULT_RANDOM_CHANNELS;
 
         case EFFECT_DISTORTION:
             return random_between(120, 320);
@@ -544,15 +549,14 @@ void free_named_preset_list(char **names, int count)
     free(names);
 }
 
-int generate_random_preset(Preset *preset, sf_count_t total_frames, int sample_rate, int channels)
+int generate_random_preset(Preset *preset, int randomness)
 {
     Preset generated;
     const EffectDescriptor *catalog;
     size_t catalog_size;
     int segment_count;
-    int remaining_frames;
 
-    if (preset == NULL || total_frames <= 0 || total_frames > INT_MAX)
+    if (preset == NULL || randomness < MIN_RANDOMNESS || randomness > MAX_RANDOMNESS)
     {
         return -1;
     }
@@ -565,53 +569,22 @@ int generate_random_preset(Preset *preset, sf_count_t total_frames, int sample_r
     }
 
     init_preset(&generated);
-    segment_count = random_between(MIN_RANDOM_SEGMENTS, MAX_RANDOM_SEGMENTS);
-
-    if (total_frames < segment_count)
-    {
-        segment_count = (int)total_frames;
-    }
-
-    remaining_frames = (int)total_frames;
+    segment_count = randomness + 1;
 
     for (int index = 0; index < segment_count; index++)
     {
         Segment segment;
-        int remaining_segments = segment_count - index - 1;
-        int maximum_length = remaining_frames - remaining_segments;
 
         segment.name = catalog[rand() % catalog_size].id;
-        segment.prmtr = random_effect_parameter(segment.name, sample_rate, channels);
+        segment.prmtr = random_effect_parameter(segment.name);
         segment.mix = random_between(MIN_MIX_PERCENT, MAX_MIX_PERCENT);
-
-        if (index + 1 == segment_count)
-        {
-            segment.length = remaining_frames;
-        }
-        else
-        {
-            int minimum_length = 1;
-
-            if (sample_rate > 0 && maximum_length > sample_rate / 10)
-            {
-                minimum_length = sample_rate / 10;
-            }
-
-            if (minimum_length > maximum_length)
-            {
-                minimum_length = maximum_length;
-            }
-
-            segment.length = random_between(minimum_length, maximum_length);
-        }
+        segment.length = random_between(MIN_RANDOM_SEGMENT_LENGTH, MAX_RANDOM_SEGMENT_LENGTH);
 
         if (append_segment(&generated, segment) != 0)
         {
             free_preset(&generated);
             return -1;
         }
-
-        remaining_frames -= segment.length;
     }
 
     free_preset(preset);

@@ -25,6 +25,6 @@ int save_named_preset(const char *file_path, const char *name, const Preset *pre
 int load_named_preset(const char *file_path, const char *name, Preset *preset);
 int list_named_presets(const char *file_path, char ***names, int *count);
 void free_named_preset_list(char **names, int count);
-int generate_random_preset(Preset *preset, sf_count_t total_frames, int sample_rate, int channels);
+int generate_random_preset(Preset *preset, int randomness);
 
 #endif
