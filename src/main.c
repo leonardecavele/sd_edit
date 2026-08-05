@@ -2013,55 +2013,6 @@ static void print_usage(void)
     }
 }
 
-static int sanitize_suffix(const char *text, char *output, size_t output_size)
-{
-    size_t output_index = 0;
-
-    if (output == NULL || output_size == 0)
-    {
-        return -1;
-    }
-
-    if (text == NULL || *text == '\0')
-    {
-        text = "processed";
-    }
-
-    while (*text != '\0' && output_index + 1 < output_size)
-    {
-        unsigned char character = (unsigned char)*text;
-
-        if (isalnum(character))
-        {
-            output[output_index++] = (char)tolower(character);
-        }
-        else if (character == '-' || character == '_')
-        {
-            output[output_index++] = (char)character;
-        }
-        else
-        {
-            output[output_index++] = '_';
-        }
-
-        text++;
-    }
-
-    if (output_index == 0)
-    {
-        if (output_size < 10)
-        {
-            return -1;
-        }
-
-        strcpy(output, "processed");
-        return 0;
-    }
-
-    output[output_index] = '\0';
-    return 0;
-}
-
 static int path_exists(const char *path)
 {
     DWORD attributes;
@@ -2077,14 +2028,17 @@ static int path_exists(const char *path)
 
 static int build_output_path_candidate(
     const char *input_path,
-    const char *suffix,
-    int collision_index,
+    int output_index,
     char *output_path,
     size_t output_size)
 {
     const char *extension;
 
-    if (input_path == NULL || output_path == NULL || output_size == 0 || !has_wav_extension(input_path))
+    if (input_path == NULL ||
+        output_path == NULL ||
+        output_size == 0 ||
+        output_index < 1 ||
+        !has_wav_extension(input_path))
     {
         return -1;
     }
@@ -2099,11 +2053,10 @@ static int build_output_path_candidate(
     if (snprintf(
         output_path,
         output_size,
-        collision_index > 0 ? "%.*s_%s%d.wav" : "%.*s_%s.wav",
+        "%.*s%d.wav",
         (int)(extension - input_path),
         input_path,
-        suffix,
-        collision_index
+        output_index
     ) >= (int)output_size)
     {
         return -1;
@@ -2114,24 +2067,18 @@ static int build_output_path_candidate(
 
 static int build_output_path(const char *input_path, const char *label, char *output_path, size_t output_size)
 {
-    char suffix[MAX_PRESET_NAME];
+    (void)label;
 
     if (input_path == NULL || output_path == NULL || output_size == 0 || !has_wav_extension(input_path))
     {
         return -1;
     }
 
-    if (sanitize_suffix(label, suffix, sizeof(suffix)) != 0)
-    {
-        return -1;
-    }
-
-    for (int collision_index = 0; collision_index < INT_MAX; collision_index++)
+    for (int output_index = 1; output_index < INT_MAX; output_index++)
     {
         if (build_output_path_candidate(
             input_path,
-            suffix,
-            collision_index,
+            output_index,
             output_path,
             output_size) != 0)
         {

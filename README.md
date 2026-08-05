@@ -221,7 +221,7 @@ Rules:
 - materializes a concrete `Preset` only after input metadata is known
 - computes segment lengths so they sum to the full input frame count
 - applies segments in order across the whole file
-- saves with a suffix derived from the current recipe display name
+- saves as `<input_without_.wav><n>.wav`, using the first available number
 
 Example:
 
@@ -234,7 +234,7 @@ Preset recipe 'random_0':
   materialization=derived at do-time from input duration and recipe seed
 random_0 [randomness=0 seed=123456789] sd_edit> do audio\test.wav
 Materialized 2 segment(s) for 4.894 second(s) of audio from recipe 'random_0'.
-Saved processed audio to audio\test_random_0.wav
+Saved processed audio to audio\test1.wav
 ```
 
 ### `play <file.wav>`
@@ -309,16 +309,10 @@ the program should materialize the same concrete segments and produce the same o
 Outputs are written as:
 
 ```text
-<input_without_.wav>_<suffix>.wav
+<input_without_.wav><n>.wav
 ```
 
-Suffix rules:
-
-- letters and digits are lowercased and kept
-- `-` and `_` are kept
-- all other characters become `_`
-- an empty suffix falls back to `processed`
-- if the target already exists, the program retries with `1`, `2`, and so on appended
+Where `n` starts at `1` and increments until an unused file name is found.
 
 ## Supported effects
 
