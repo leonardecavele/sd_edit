@@ -1795,7 +1795,7 @@ static int build_prompt_text(const Session *session, char *buffer, size_t buffer
     return snprintf(
         buffer,
         buffer_size,
-        "%s:[%s]%s> ",
+        "%s [%s] %s> ",
         preset_name,
         summary,
         PROGRAM_NAME) >= (int)buffer_size ? -1 : 0;
@@ -1812,48 +1812,6 @@ static void write_prompt_text_plain(const Session *session)
     }
 
     printf("%s", prompt);
-}
-
-static void write_prompt_text_colored(const Session *session)
-{
-    const char *preset_name = current_preset_display_name(session);
-    char summary[128];
-    HANDLE output_handle;
-    CONSOLE_SCREEN_BUFFER_INFO console_info;
-    WORD default_attributes;
-    WORD base_attributes;
-
-    if (preset_name == NULL)
-    {
-        printf("%s> ", PROGRAM_NAME);
-        return;
-    }
-
-    if (format_preset_summary(&session->current_preset, summary, sizeof(summary)) != 0)
-    {
-        write_prompt_text_plain(session);
-        return;
-    }
-
-    output_handle = GetStdHandle(STD_OUTPUT_HANDLE);
-
-    if (output_handle == NULL ||
-        output_handle == INVALID_HANDLE_VALUE ||
-        GetConsoleScreenBufferInfo(output_handle, &console_info) == 0)
-    {
-        write_prompt_text_plain(session);
-        return;
-    }
-
-    default_attributes = console_info.wAttributes;
-    base_attributes = default_attributes & ~(FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE | FOREGROUND_INTENSITY);
-
-    SetConsoleTextAttribute(output_handle, base_attributes | FOREGROUND_GREEN | FOREGROUND_INTENSITY);
-    printf("%s:", preset_name);
-    SetConsoleTextAttribute(output_handle, base_attributes | FOREGROUND_RED | FOREGROUND_INTENSITY);
-    printf("[%s]", summary);
-    SetConsoleTextAttribute(output_handle, default_attributes);
-    printf("%s> ", PROGRAM_NAME);
 }
 
 static void redraw_prompt_line(const Session *session, const char *buffer, size_t *previous_length)
@@ -1873,7 +1831,7 @@ static void redraw_prompt_line(const Session *session, const char *buffer, size_
 
     current_length = strlen(prompt) + strlen(buffer);
     printf("\r");
-    write_prompt_text_colored(session);
+    write_prompt_text_plain(session);
     printf("%s", buffer);
 
     if (*previous_length > current_length)
@@ -1884,7 +1842,7 @@ static void redraw_prompt_line(const Session *session, const char *buffer, size_
         }
 
         printf("\r");
-        write_prompt_text_colored(session);
+        write_prompt_text_plain(session);
         printf("%s", buffer);
     }
 

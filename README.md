@@ -153,11 +153,11 @@ sd_edit>
 When a preset is active, the prompt shows the preset name and prompt stats before `sd_edit>`:
 
 ```text
-random_5:[segments=6 length=247143]sd_edit>
-demo:[segments=6 length=247143]sd_edit>
+random_5 [segments=6 length=247143] sd_edit>
+demo [segments=6 length=247143] sd_edit>
 ```
 
-On a Windows console, the preset name is shown in green and the stats are shown in red. When colored redraw is unavailable, the same text is printed without color.
+The prompt is rendered as plain text with spaces between the preset name, the stats block, and `sd_edit>`.
 
 ### Tab completion
 
@@ -269,14 +269,14 @@ sd_edit> preset random
 Generated preset 'random_5'.
 Preset 'random_5' with 6 segment(s):
   1. effect=...
-random_5:[segments=6 length=...]sd_edit> do audio\test.wav
+random_5 [segments=6 length=...] sd_edit> do audio\test.wav
 Saved processed audio to audio\test_random_5.wav
-random_5:[segments=6 length=...]sd_edit> preset save demo
+random_5 [segments=6 length=...] sd_edit> preset save demo
 Saved current preset as 'demo' to presets.txt
-demo:[segments=6 length=...]sd_edit> show preset demo
+demo [segments=6 length=...] sd_edit> show preset demo
 Preset 'demo' with 6 segment(s):
   1. effect=...
-demo:[segments=6 length=...]sd_edit> exit
+demo [segments=6 length=...] sd_edit> exit
 ```
 
 ## Session model
