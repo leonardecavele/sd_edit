@@ -1,10 +1,15 @@
 # sd_edit
 
-`sd_edit` is a small C console tool for `.wav` editing. It uses libsndfile for audio I/O and models processing as an ordered preset made of effect segments.
+`sd_edit` is a small C console tool for `.wav` editing. It uses libsndfile for audio I/O and applies effects through ordered presets.
 
-This README is the product definition for the repository and documents the code as it behaves now.
+The repository now treats presets in two layers:
+
+- a persisted recipe, which is small and deterministic
+- a materialized preset, which is generated only when `do <file.wav>` knows the input duration
 
 ## Core preset model
+
+The concrete execution model is still an array of segments:
 
 ```c
 typedef struct
@@ -22,18 +27,28 @@ typedef struct
 } Preset;
 ```
 
-A preset is an ordered array of segments. Each segment selects:
+Each segment selects:
 
 - one effect ID
 - one effect parameter
 - one wet/dry mix percentage
-- one segment length
+- one segment length in frames
+
+Persisted random presets are stored as recipes:
+
+```c
+typedef struct
+{
+    int randomness;
+    unsigned int seed;
+} PresetRecipe;
+```
+
+`PresetRecipe` is what `preset random`, `preset save`, `preset load`, and `show preset` operate on. `Preset` is what `do <file.wav>` materializes and applies.
 
 The tool is `.wav`-only.
 
 ## Command model
-
-The console now uses a session-first workflow.
 
 Supported commands:
 
@@ -47,14 +62,20 @@ Supported commands:
 - `exit`
 - `quit`
 
-The intended flow is:
+The active session keeps exactly one current preset recipe in memory.
 
-1. start with no preset loaded
-2. load or generate the active preset explicitly
-3. apply the active preset with `do <file.wav>`
-4. optionally save it for reuse
+Typical flow:
 
-`do` no longer generates or loads presets on demand.
+1. `preset random [randomness]` or `preset load <name>`
+2. `show preset`
+3. `do <file.wav>`
+4. optionally `preset save <name>`
+
+`do` does not use a pre-baked segment list anymore. It derives the concrete segment count, segment lengths, effect IDs, and parameters from:
+
+- the recipe `randomness`
+- the recipe `seed`
+- the input file duration and audio metadata
 
 ## Build and run
 
@@ -72,13 +93,7 @@ The repository bundles libsndfile in `libsndfile-1.2.2-win64/`.
 make
 ```
 
-This produces:
-
-```text
-sd_edit.exe
-```
-
-Clean build outputs:
+Clean outputs:
 
 ```sh
 make clean
@@ -90,35 +105,23 @@ Run through the makefile wrapper:
 make run
 ```
 
-The wrapper prepends the bundled `libsndfile-1.2.2-win64\bin` directory to `PATH` and launches `sd_edit.exe`.
+The wrapper prepends `libsndfile-1.2.2-win64\bin` to `PATH` and launches `sd_edit.exe`.
 
 ### Direct execution
-
-After building:
 
 ```sh
 sd_edit.exe
 ```
 
-Useful one-shot direct commands:
+Useful one-shot commands:
 
 ```sh
 sd_edit.exe help
-sd_edit.exe play audio\test.wav
 sd_edit.exe show preset demo
+sd_edit.exe play audio\test.wav
 ```
 
-`do <file.wav>` depends on the current in-process preset, so it is normally used from the interactive prompt rather than as a one-shot direct command.
-
-### Runtime DLL behavior
-
-At startup, `sd_edit.exe` tries to load `sndfile.dll` in this order:
-
-1. from the bundled repository path relative to the executable:
-   `libsndfile-1.2.2-win64\bin\sndfile.dll`
-2. from the current process `PATH`
-
-If both fail, the program prints a controlled error instead of failing before `main()`.
+`do <file.wav>` still depends on the current in-process recipe, so it is normally used from the interactive prompt.
 
 ## Interactive console
 
@@ -134,34 +137,20 @@ or:
 sd_edit.exe
 ```
 
-The startup banner is:
-
-```text
-sd_edit
-Type 'help' for commands and 'exit' or 'quit' to leave.
-sd_edit>
-```
-
-### Prompt behavior
-
-When no preset is active, the prompt is just:
+When no recipe is active, the prompt is:
 
 ```text
 sd_edit>
 ```
 
-When a preset is active, the prompt shows the preset name and prompt stats before `sd_edit>`:
+When a recipe is active, the prompt shows recipe metadata:
 
 ```text
-random_5 [segments=6 length=247143] sd_edit>
-demo [segments=6 length=247143] sd_edit>
+random_5 [randomness=5 seed=123456789] sd_edit>
+demo [randomness=5 seed=123456789] sd_edit>
 ```
 
-The prompt is rendered as plain text with spaces between the preset name, the stats block, and `sd_edit>`.
-
-### Tab completion
-
-The prompt supports `Tab` completion for:
+Tab completion still covers:
 
 - top-level command names
 - `.wav` paths after `do ` and `play `
@@ -169,34 +158,19 @@ The prompt supports `Tab` completion for:
 - randomness values `0` through `10` after `preset random `
 - saved preset names after `preset load `, `preset save `, and `show preset `
 
-When there are multiple matches, the first `Tab` extends to the longest common prefix and repeated `Tab` presses cycle through matches.
-
-If a path contains spaces, start the token with a quote before using `Tab`.
-
 ## Command behavior
-
-### `help`
-
-Prints the command list and the current effect catalog.
 
 ### `preset random [randomness]`
 
-Creates the current in-memory preset without loading any audio file first.
+Creates a deterministic recipe, not a stored segment list.
 
 Rules:
 
 - omitted `randomness` defaults to `5`
 - `randomness` must be an integer in `0..10`
-- the number maps directly to the segment count as `randomness + 1`
-- `0` creates `1` segment
-- `10` creates `11` segments
-- invalid values do not replace the current preset
-
-The generated preset receives a synthetic session name:
-
-```text
-random_<randomness>
-```
+- a new unsigned `seed` is minted when the recipe is created
+- the session name is `random_<randomness>`
+- invalid values do not replace the current recipe
 
 Examples:
 
@@ -204,53 +178,64 @@ Examples:
 - `preset random 0`
 - `preset random 10`
 
-### `preset load <name>`
-
-Loads the latest valid preset named `<name>` from `presets.txt`, stores it as the current session preset, prints it, and updates the prompt prefix to that preset name.
-
-### `preset save <name>`
-
-Appends the current session preset to `presets.txt`.
-
-Rules:
-
-- fails if there is no current preset in the running process
-- preserves the existing append-only storage format
-- after a successful save, the active preset display name becomes `<name>`
-
 ### `show preset`
 
-Prints the current session preset.
-
-If no preset is active, it prints:
+Prints the current recipe metadata:
 
 ```text
-No current preset.
+Preset recipe 'random_5':
+  randomness=5
+  seed=123456789
+  materialization=derived at do-time from input duration and recipe seed
 ```
+
+It does not print a fake precomputed segment list.
 
 ### `show preset <name>`
 
-Loads and prints the latest valid stored preset named `<name>` from `presets.txt` without replacing the current session preset.
+Loads and prints the latest valid stored recipe named `<name>` from `presets.txt` without replacing the current session recipe.
 
-This is read-only named lookup.
+### `preset save <name>`
 
-### `do <file.wav>`
-
-Applies the current session preset to the input file and writes a processed `.wav` output.
+Appends the current recipe to `presets.txt`.
 
 Rules:
 
-- fails if there is no current preset
+- fails if there is no current recipe
+- saves only deterministic constants
+- after a successful save, the active display name becomes `<name>`
+
+### `preset load <name>`
+
+Loads the latest valid stored recipe named `<name>` from `presets.txt`, stores it as the current session recipe, prints it, and updates the prompt prefix.
+
+### `do <file.wav>`
+
+Applies the current session recipe to the input file and writes a processed `.wav` output.
+
+Rules:
+
+- fails if there is no current recipe
 - only accepts `.wav` input
-- uses the current preset display name as the output suffix
-- applies segments in order to consecutive parts of the sample buffer
-- truncates a segment if it would run past end-of-file
-- leaves any uncovered tail audio unchanged
+- loads the audio first
+- materializes a concrete `Preset` only after input metadata is known
+- computes segment lengths so they sum to the full input frame count
+- applies segments in order across the whole file
+- saves with a suffix derived from the current recipe display name
 
-Examples:
+Example:
 
-- after `preset random 5`, `do audio\test.wav` writes `audio\test_random_5.wav`
-- after `preset load demo`, `do audio\test.wav` writes `audio\test_demo.wav`
+```text
+sd_edit> preset random 0
+Generated preset recipe 'random_0'.
+Preset recipe 'random_0':
+  randomness=0
+  seed=123456789
+  materialization=derived at do-time from input duration and recipe seed
+random_0 [randomness=0 seed=123456789] sd_edit> do audio\test.wav
+Materialized 2 segment(s) for 4.894 second(s) of audio from recipe 'random_0'.
+Saved processed audio to audio\test_random_0.wav
+```
 
 ### `play <file.wav>`
 
@@ -258,103 +243,66 @@ Launches the bundled `sndfile-play.exe` relative to `sd_edit.exe` and waits for 
 
 ### `exit` / `quit`
 
-Leave the interactive console.
+Leaves the interactive console.
 
-## Example interactive session
+## Sample-aware random recipe behavior
 
-```text
-sd_edit> show preset
-No current preset.
-sd_edit> preset random
-Generated preset 'random_5'.
-Preset 'random_5' with 6 segment(s):
-  1. effect=...
-random_5 [segments=6 length=...] sd_edit> do audio\test.wav
-Saved processed audio to audio\test_random_5.wav
-random_5 [segments=6 length=...] sd_edit> preset save demo
-Saved current preset as 'demo' to presets.txt
-demo [segments=6 length=...] sd_edit> show preset demo
-Preset 'demo' with 6 segment(s):
-  1. effect=...
-demo [segments=6 length=...] sd_edit> exit
-```
+Random preset materialization is based on a duration-aware density curve.
 
-## Session model
+At the low end:
 
-The program keeps exactly one current preset in memory per process.
+- about `2s` with `randomness=0` materializes `1` segment
+- about `5s` with `randomness=0` materializes `2` segments
 
-That affects command behavior directly:
+At the high end:
 
-- `preset random [randomness]` replaces the current session preset
-- `preset load <name>` replaces the current session preset
-- `preset save <name>` persists the current session preset
-- `show preset` reads the current session preset
-- `show preset <name>` does not replace the current session preset
-- `do <file.wav>` uses the current session preset as-is
+- about `30s` with `randomness=10` materializes inside a `40..60` segment band
 
-Preset state is not shared across separate invocations.
+The exact concrete count is chosen deterministically from a recipe-local PRNG. Very small counts collapse to a single exact value so short files do not oscillate.
 
-That means this does not work:
+The concrete segment lengths are then split across the full file with deterministic jitter, while keeping every segment length positive and making the total match the full input frame count.
 
-```text
-sd_edit.exe preset random 5
-sd_edit.exe do audio\test.wav
-```
+That means:
 
-The second command starts a fresh process with no current preset loaded. Use the interactive prompt when you want to chain `preset random` or `preset load` into `do`.
+- the same recipe on the same input file replays identically
+- the same recipe on a different duration can materialize a different concrete preset
+- the concrete preset is not persisted; it is regenerated when `do` runs
 
-## Preset format and persistence
+## Preset storage
 
 ### Stored format
 
-Named presets are stored in `presets.txt` as:
+Named presets in `presets.txt` now use:
 
 ```text
-name|segment_count|definition
+name|randomness|seed
 ```
 
 Example:
 
 ```text
-demo|2|1,120,50,44100;5,8000,40,22050
+demo|5|123456789
 ```
 
-Persistence rules:
+Rules:
 
 - saves append one new line
 - there is no in-place update or deduplication
 - names cannot contain `|`, carriage returns, or newlines
 - invalid lines are skipped while loading and while collecting completion suggestions
-- if the same name appears multiple times, the latest valid matching line wins when loading
+- if the same name appears multiple times, the latest valid matching line wins
+- legacy `name|segment_count|definition` lines are no longer considered valid stored presets
 
-### Definition syntax
+### Determinism contract
 
-Stored preset definitions still use:
+For the same:
 
-```text
-effect,parameter,mix,length;effect,parameter,mix,length;...
-```
+- recipe name
+- recipe `randomness`
+- recipe `seed`
+- input audio bytes
 
-Parser rules:
-
-- segments are separated with `;`
-- each segment must contain exactly four integers
-- surrounding whitespace is tolerated
-- effect IDs must exist in the effect catalog
-- `mix` must be in `0..100`
-- `length` must be greater than `0`
-
-### Length interpretation
-
-`length` is consumed by the processing loop as a frame count. During processing, each segment spans:
-
-```text
-segment.length * channels
-```
-
-raw samples in the current file.
-
-Randomly generated presets use positive default frame lengths in the range `11025..88200`. This keeps presets serializable before any audio file has been selected. If a generated segment is longer than the remaining input, processing truncates it at EOF.
+the program should materialize the same concrete segments and produce the same output bytes.
 
 ## Output naming
 
@@ -370,13 +318,7 @@ Suffix rules:
 - `-` and `_` are kept
 - all other characters become `_`
 - an empty suffix falls back to `processed`
-- if the target path already exists, the program retries with `1`, `2`, and so on appended
-
-Examples:
-
-- active preset `random_5` -> `audio\test_random_5.wav`
-- active preset `demo` -> `audio\test_demo.wav`
-- if `audio\test_demo.wav` already exists, the next save becomes `audio\test_demo1.wav`
+- if the target already exists, the program retries with `1`, `2`, and so on appended
 
 ## Supported effects
 
@@ -392,7 +334,7 @@ The effect catalog is centralized in `include/effects.h` and `src/effects.c`:
 Current parameter behavior:
 
 - `1 pitch`: `prmtr` is pitch percent, `mix` is used
-- `2 shuffle`: `prmtr` is chunk size, `mix` is ignored
+- `2 shuffle`: `prmtr` is chunk size in samples, `mix` is ignored
 - `3 gain`: `prmtr` is gain percent, `mix` is used
 - `4 reverse`: `prmtr` and `mix` are ignored
 - `5 echo`: `prmtr` is delay in samples, `mix` is used
@@ -400,88 +342,29 @@ Current parameter behavior:
 
 ## Architecture
 
-### Responsibility split
-
 - `src/main.c`
-  - process-local session state
-  - interactive console and direct command dispatch
-  - prompt rendering and completion
+  - session state
+  - prompt and command dispatch
   - audio file loading and saving
-  - preset application over the audio buffer
+  - recipe-driven processing flow
   - playback launch
 
 - `src/preset.c`
   - `Preset` memory management
-  - preset parsing
-  - named preset save/load/list operations
-  - random preset generation
+  - stored recipe parsing
+  - named recipe save/load/list operations
+  - deterministic recipe generation
+  - sample-aware preset materialization
 
 - `src/effects.c`
   - effect catalog
   - effect dispatch
   - effect implementations
 
-- `include/preset.h`
-  - shared preset structs and preset API
-
-- `include/effects.h`
-  - effect IDs and effect API
-
-### Execution flow
-
-`preset random [randomness]`:
-
-1. validate the optional randomness value
-2. generate `randomness + 1` segments from the centralized effect catalog
-3. assign random parameters, mixes, and positive default lengths
-4. store the preset in the current session under `random_<randomness>`
-5. print the preset and update the prompt
-
-`preset load <name>`:
-
-1. scan `presets.txt`
-2. keep the latest valid matching entry
-3. store it as the current session preset
-4. print it and update the prompt
-
-`do <file.wav>`:
-
-1. validate that a current preset exists
-2. validate the `.wav` path
-3. load the audio into memory
-4. apply preset segments in order
-5. save the result with a suffix derived from the current preset name
-
-`show preset <name>`:
-
-1. scan `presets.txt`
-2. keep the latest valid matching entry
-3. print it
-4. leave the current session unchanged
-
-`play <file.wav>`:
-
-1. validate the `.wav` path
-2. resolve the bundled `libsndfile-1.2.2-win64\bin\sndfile-play.exe` relative to `sd_edit.exe`
-3. resolve the absolute path to the input file
-4. spawn the player and wait for it to exit
-
-## Repository layout
-
-- `src/main.c`: CLI, prompt, audio I/O, preset application, playback
-- `src/preset.c`: preset parsing, storage, loading, random generation
-- `src/effects.c`: effect catalog and effect implementations
-- `include/preset.h`: preset structs and preset API
-- `include/effects.h`: effect IDs and effect API
-- `audio/`: sample input and output files used for local testing
-- `presets.txt`: append-only named preset store
-- `libsndfile-1.2.2-win64/`: bundled libsndfile and `sndfile-play.exe`
-- `makefile`: build, run, and clean targets
-
 ## Current limitations
 
 - `.wav` is the only supported format
-- preset state is process-local
+- preset recipe state is process-local
 - named preset storage is plain text and append-only
 - processing is in-memory, not streaming
 - playback depends on the bundled Windows player and a working libsndfile runtime

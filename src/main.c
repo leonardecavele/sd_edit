@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <time.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 
@@ -50,8 +49,8 @@ typedef struct
 
 typedef struct
 {
-    Preset current_preset;
-    int has_current_preset;
+    PresetRecipe current_recipe;
+    int has_current_recipe;
     char current_preset_name[MAX_PRESET_NAME];
 } Session;
 
@@ -316,8 +315,8 @@ static void init_session(Session *session)
         return;
     }
 
-    init_preset(&session->current_preset);
-    session->has_current_preset = 0;
+    init_preset_recipe(&session->current_recipe);
+    session->has_current_recipe = 0;
     session->current_preset_name[0] = '\0';
 }
 
@@ -328,8 +327,8 @@ static void free_session(Session *session)
         return;
     }
 
-    free_preset(&session->current_preset);
-    session->has_current_preset = 0;
+    init_preset_recipe(&session->current_recipe);
+    session->has_current_recipe = 0;
     session->current_preset_name[0] = '\0';
 }
 
@@ -1730,7 +1729,7 @@ static int prompt_supports_completion(void)
 
 static const char *current_preset_display_name(const Session *session)
 {
-    if (session == NULL || !session->has_current_preset)
+    if (session == NULL || !session->has_current_recipe)
     {
         return NULL;
     }
@@ -1743,30 +1742,21 @@ static const char *current_preset_display_name(const Session *session)
     return "preset";
 }
 
-static int format_preset_summary(const Preset *preset, char *buffer, size_t buffer_size)
+static int format_recipe_summary(const PresetRecipe *recipe, char *buffer, size_t buffer_size)
 {
-    long long total_length = 0;
-
-    if (preset == NULL ||
+    if (!preset_recipe_is_valid(recipe) ||
         buffer == NULL ||
-        buffer_size == 0 ||
-        preset->nb_seg <= 0 ||
-        preset->segments == NULL)
+        buffer_size == 0)
     {
         return -1;
-    }
-
-    for (int index = 0; index < preset->nb_seg; index++)
-    {
-        total_length += preset->segments[index].length;
     }
 
     if (snprintf(
         buffer,
         buffer_size,
-        "segments=%d length=%lld",
-        preset->nb_seg,
-        total_length) >= (int)buffer_size)
+        "randomness=%d seed=%u",
+        recipe->randomness,
+        recipe->seed) >= (int)buffer_size)
     {
         return -1;
     }
@@ -1787,7 +1777,7 @@ static int build_prompt_text(const Session *session, char *buffer, size_t buffer
     preset_name = current_preset_display_name(session);
 
     if (preset_name == NULL ||
-        format_preset_summary(&session->current_preset, summary, sizeof(summary)) != 0)
+        format_recipe_summary(&session->current_recipe, summary, sizeof(summary)) != 0)
     {
         return snprintf(buffer, buffer_size, "%s> ", PROGRAM_NAME) >= (int)buffer_size ? -1 : 0;
     }
@@ -1955,9 +1945,9 @@ static int read_interactive_line(
     }
 }
 
-static void print_preset(const Preset *preset, const char *preset_name)
+static void print_recipe(const PresetRecipe *recipe, const char *preset_name)
 {
-    if (preset == NULL || preset->nb_seg <= 0 || preset->segments == NULL)
+    if (!preset_recipe_is_valid(recipe))
     {
         printf("No current preset.\n");
         return;
@@ -1965,38 +1955,27 @@ static void print_preset(const Preset *preset, const char *preset_name)
 
     if (preset_name != NULL && *preset_name != '\0')
     {
-        printf("Preset '%s' with %d segment(s):\n", preset_name, preset->nb_seg);
+        printf("Preset recipe '%s':\n", preset_name);
     }
     else
     {
-        printf("Preset with %d segment(s):\n", preset->nb_seg);
+        printf("Preset recipe:\n");
     }
 
-    for (int index = 0; index < preset->nb_seg; index++)
-    {
-        Segment segment = preset->segments[index];
-
-        printf(
-            "  %d. effect=%d (%s), prmtr=%d, mix=%d, length=%d\n",
-            index + 1,
-            segment.name,
-            effect_name(segment.name),
-            segment.prmtr,
-            segment.mix,
-            segment.length
-        );
-    }
+    printf("  randomness=%d\n", recipe->randomness);
+    printf("  seed=%u\n", recipe->seed);
+    printf("  materialization=derived at do-time from input duration and recipe seed\n");
 }
 
 static void print_current_preset(const Session *session)
 {
-    if (session == NULL || !session->has_current_preset)
+    if (session == NULL || !session->has_current_recipe)
     {
         printf("No current preset.\n");
         return;
     }
 
-    print_preset(&session->current_preset, current_preset_display_name(session));
+    print_recipe(&session->current_recipe, current_preset_display_name(session));
 }
 
 static void print_usage(void)
@@ -2168,19 +2147,19 @@ static int build_output_path(const char *input_path, const char *label, char *ou
     return -1;
 }
 
-static int update_current_preset(Session *session, const Preset *preset, const char *preset_name)
+static int update_current_recipe(Session *session, const PresetRecipe *recipe, const char *preset_name)
 {
-    if (session == NULL || preset == NULL)
+    if (session == NULL || recipe == NULL)
     {
         return -1;
     }
 
-    if (copy_preset(&session->current_preset, preset) != 0)
+    if (copy_preset_recipe(&session->current_recipe, recipe) != 0)
     {
         return -1;
     }
 
-    session->has_current_preset = 1;
+    session->has_current_recipe = 1;
     set_current_preset_name(session, preset_name);
     return 0;
 }
@@ -2368,14 +2347,15 @@ static int apply_preset_to_samples(short *samples, const SF_INFO *info, const Pr
     return 0;
 }
 
-static int process_audio_file(const char *input_path, const Preset *preset, const char *output_label)
+static int process_audio_file(const char *input_path, const PresetRecipe *recipe, const char *output_label)
 {
     SF_INFO info;
+    Preset preset;
     short *samples = NULL;
     char output_path[MAX_OUTPUT_PATH];
     int result = -1;
 
-    if (input_path == NULL || preset == NULL)
+    if (input_path == NULL || recipe == NULL)
     {
         return -1;
     }
@@ -2392,12 +2372,26 @@ static int process_audio_file(const char *input_path, const Preset *preset, cons
         return -1;
     }
 
+    init_preset(&preset);
+
     if (load_audio_file(input_path, &samples, &info) != 0)
     {
         return -1;
     }
 
-    if (apply_preset_to_samples(samples, &info, preset) != 0)
+    if (materialize_preset_from_recipe(&preset, recipe, &info) != 0)
+    {
+        fprintf(stderr, "Unable to materialize a concrete preset for: %s\n", input_path);
+        goto cleanup;
+    }
+
+    printf(
+        "Materialized %d segment(s) for %.3f second(s) of audio from recipe '%s'.\n",
+        preset.nb_seg,
+        info.samplerate > 0 ? (double)info.frames / (double)info.samplerate : 0.0,
+        output_label != NULL ? output_label : "preset");
+
+    if (apply_preset_to_samples(samples, &info, &preset) != 0)
     {
         goto cleanup;
     }
@@ -2411,6 +2405,7 @@ static int process_audio_file(const char *input_path, const Preset *preset, cons
     result = 0;
 
 cleanup:
+    free_preset(&preset);
     free(samples);
     return result;
 }
@@ -2427,7 +2422,7 @@ static void build_random_preset_name(int randomness, char *buffer, size_t buffer
 
 static int handle_preset_random_command(Session *session, const char *randomness_text)
 {
-    Preset preset;
+    PresetRecipe recipe;
     int randomness = DEFAULT_RANDOMNESS;
     char preset_name[MAX_PRESET_NAME];
 
@@ -2446,32 +2441,30 @@ static int handle_preset_random_command(Session *session, const char *randomness
         return -1;
     }
 
-    init_preset(&preset);
+    init_preset_recipe(&recipe);
 
-    if (generate_random_preset(&preset, randomness) != 0)
+    if (generate_random_recipe(&recipe, randomness) != 0)
     {
-        fprintf(stderr, "Unable to generate a random preset.\n");
+        fprintf(stderr, "Unable to generate a random preset recipe.\n");
         return -1;
     }
 
     build_random_preset_name(randomness, preset_name, sizeof(preset_name));
 
-    if (update_current_preset(session, &preset, preset_name) != 0)
+    if (update_current_recipe(session, &recipe, preset_name) != 0)
     {
-        fprintf(stderr, "Unable to store the current preset in memory.\n");
-        free_preset(&preset);
+        fprintf(stderr, "Unable to store the current preset recipe in memory.\n");
         return -1;
     }
 
-    free_preset(&preset);
-    printf("Generated preset '%s'.\n", current_preset_display_name(session));
+    printf("Generated preset recipe '%s'.\n", current_preset_display_name(session));
     print_current_preset(session);
     return 0;
 }
 
 static int handle_preset_load_command(Session *session, const char *name)
 {
-    Preset preset;
+    PresetRecipe recipe;
 
     if (session == NULL || name == NULL || is_space_or_empty(name))
     {
@@ -2479,22 +2472,20 @@ static int handle_preset_load_command(Session *session, const char *name)
         return -1;
     }
 
-    init_preset(&preset);
+    init_preset_recipe(&recipe);
 
-    if (load_named_preset(PRESET_STORE_PATH, name, &preset) != 0)
+    if (load_named_preset(PRESET_STORE_PATH, name, &recipe) != 0)
     {
         fprintf(stderr, "Preset '%s' was not found in %s.\n", name, PRESET_STORE_PATH);
         return -1;
     }
 
-    if (update_current_preset(session, &preset, name) != 0)
+    if (update_current_recipe(session, &recipe, name) != 0)
     {
-        fprintf(stderr, "Unable to store the current preset in memory.\n");
-        free_preset(&preset);
+        fprintf(stderr, "Unable to store the current preset recipe in memory.\n");
         return -1;
     }
 
-    free_preset(&preset);
     printf("Loaded preset '%s'.\n", name);
     print_current_preset(session);
     return 0;
@@ -2508,13 +2499,13 @@ static int handle_preset_save_command(Session *session, const char *name)
         return -1;
     }
 
-    if (!session->has_current_preset)
+    if (!session->has_current_recipe)
     {
         fprintf(stderr, "No current preset is loaded. Use 'preset random [randomness]' or 'preset load <name>' first.\n");
         return -1;
     }
 
-    if (save_named_preset(PRESET_STORE_PATH, name, &session->current_preset) != 0)
+    if (save_named_preset(PRESET_STORE_PATH, name, &session->current_recipe) != 0)
     {
         fprintf(stderr, "Unable to save preset '%s' to %s.\n", name, PRESET_STORE_PATH);
         return -1;
@@ -2527,7 +2518,7 @@ static int handle_preset_save_command(Session *session, const char *name)
 
 static int handle_show_named_preset_command(const char *name)
 {
-    Preset preset;
+    PresetRecipe recipe;
 
     if (name == NULL || is_space_or_empty(name))
     {
@@ -2535,16 +2526,15 @@ static int handle_show_named_preset_command(const char *name)
         return -1;
     }
 
-    init_preset(&preset);
+    init_preset_recipe(&recipe);
 
-    if (load_named_preset(PRESET_STORE_PATH, name, &preset) != 0)
+    if (load_named_preset(PRESET_STORE_PATH, name, &recipe) != 0)
     {
         fprintf(stderr, "Preset '%s' was not found in %s.\n", name, PRESET_STORE_PATH);
         return -1;
     }
 
-    print_preset(&preset, name);
-    free_preset(&preset);
+    print_recipe(&recipe, name);
     return 0;
 }
 
@@ -2555,7 +2545,7 @@ static int handle_do_command(Session *session, const char *input_path)
         return -1;
     }
 
-    if (!session->has_current_preset)
+    if (!session->has_current_recipe)
     {
         fprintf(stderr, "No current preset is loaded. Use 'preset random [randomness]' or 'preset load <name>' first.\n");
         return -1;
@@ -2569,7 +2559,7 @@ static int handle_do_command(Session *session, const char *input_path)
 
     return process_audio_file(
         input_path,
-        &session->current_preset,
+        &session->current_recipe,
         current_preset_display_name(session));
 }
 
@@ -2791,7 +2781,6 @@ int main(int argc, char **argv)
     }
 
     init_session(&session);
-    srand((unsigned int)time(NULL));
     exit_code = run_cli(&session, argc, argv);
     free_session(&session);
     unload_sndfile_runtime();

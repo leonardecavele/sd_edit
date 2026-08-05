@@ -22,6 +22,17 @@ static const EffectDescriptor EFFECT_CATALOG[] =
     { EFFECT_DISTORTION, "distortion" }
 };
 
+static unsigned int next_shuffle_state(unsigned int *state)
+{
+    if (state == NULL)
+    {
+        return 0;
+    }
+
+    *state = (*state * 1664525u) + 1013904223u;
+    return *state;
+}
+
 static short clamp_sample(int value)
 {
     if (value > SAMPLE_MAX)
@@ -91,6 +102,7 @@ void shuffle_chunks(short *buffer, sf_count_t c, int chunk_size)
     short *copy = NULL;
     int *order = NULL;
     int chunk_count;
+    unsigned int shuffle_state;
 
     if (buffer == NULL || c <= 0 || chunk_size <= 0)
     {
@@ -121,9 +133,11 @@ void shuffle_chunks(short *buffer, sf_count_t c, int chunk_size)
         order[i] = i;
     }
 
+    shuffle_state = (unsigned int)c ^ ((unsigned int)chunk_size * 0x9e3779b9u);
+
     for (int i = chunk_count - 1; i > 0; i--)
     {
-        int j = rand() % (i + 1);
+        int j = (int)(next_shuffle_state(&shuffle_state) % (unsigned int)(i + 1));
         int tmp = order[i];
         order[i] = order[j];
         order[j] = tmp;
