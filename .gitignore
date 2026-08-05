@@ -2,7 +2,7 @@
 *.o
 *.obj
 *.d
-main.exe
+*.exe
 *.out
 *.stackdump
 
@@ -22,6 +22,7 @@ main.exe
 .vs/
 
 .cache
+audio/
 
 # OS noise
 Thumbs.db
