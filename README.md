@@ -1,20 +1,8 @@
-# sd_edit
-
 `sd_edit` is a small C command-line tool for `.wav` editing. It uses libsndfile for audio I/O and applies effects through ordered presets.
 
-## Product goal
+This repository serves solely as a sandbox for experimenting with agentic development environments, such as JetBrains Air. It is not intended to become a complete or production-ready project.
 
-The target interface is:
-
-- `do <file.wav>`
-- `do <file.wav> <preset_name>`
-- `preset <preset_definition>`
-- `save preset <name>`
-- `play <file.wav>`
-
-`do` loads a `.wav`, applies a preset, and saves a processed `.wav`.
-
-## Preset model
+### Preset model
 
 Presets are arrays of effect segments:
 
@@ -53,7 +41,7 @@ typedef struct
 
 `PresetRecipe` is persisted and reused. `Preset` is materialized for a specific input file.
 
-## Effects
+### Effects
 
 Effect IDs stay centralized in `include/effects.h` and `src/effects.c`.
 
@@ -64,7 +52,7 @@ Effect IDs stay centralized in `include/effects.h` and `src/effects.c`.
 - `5`: echo
 - `6`: distortion
 
-## Implemented CLI
+### Implemented CLI
 
 The executable exposes:
 
@@ -85,7 +73,7 @@ Typical flow:
 3. `do <file.wav>`
 4. `preset save <name>` if needed
 
-## Preset storage
+### Preset storage
 
 Saved preset recipes are stored in `presets.txt` with this format:
 
@@ -95,17 +83,7 @@ name|randomness|seed
 
 If the same name appears several times, the latest valid entry wins.
 
-## Output naming
-
-Processed files are written as:
-
-```text
-<input_without_.wav><n>.wav
-```
-
-`n` starts at `1` and increments until a free file name is found.
-
-## Build and run
+### Build and run
 
 Prerequisites:
 
@@ -146,7 +124,7 @@ sd_edit.exe help
 sd_edit.exe play audio\test.wav
 ```
 
-## Project layout
+### Project layout
 
 - `src/main.c`: CLI, prompt, file I/O, command dispatch
 - `src/preset.c`: preset parsing, storage, random generation, materialization
@@ -155,7 +133,7 @@ sd_edit.exe play audio\test.wav
 - `include/preset.h`: preset data structures and APIs
 - `audio/`: sample audio files
 
-## Scope
+### Scope
 
 - `.wav` only
 - libsndfile-compatible file I/O
